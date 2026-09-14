@@ -21,6 +21,8 @@ The package currently proves the lowest layer:
 
 The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
 
+On macOS, a default CMake installation of the Khronos OpenXR loader commonly places `libopenxr_loader.dylib` in `/usr/local/lib`. The SwiftXR example executables therefore include `/usr/local/lib` in their runtime library search path. Applications that consume SwiftXR as a library should likewise ensure that their executable can locate the OpenXR loader installed on the system.
+
 ## Example program
 
 `Examples/HelloSwiftXR/main.swift` is a deliberately small application using only the public SwiftXR API. It discovers the active OpenXR runtime, lists its extensions and verifies that `XR_KHR_metal_enable` is available.
