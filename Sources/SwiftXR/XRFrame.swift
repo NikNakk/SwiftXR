@@ -1,4 +1,5 @@
 import COpenXR
+import Metal
 
 public struct XRVector3: Sendable, Hashable {
     public let x: Float
@@ -77,13 +78,34 @@ private func makeView(_ data: SwiftXRViewData) -> XRView {
     )
 }
 
+private func makeFrame(
+    timing: SwiftXRFrameTiming,
+    locatedViews: SwiftXRLocatedViews
+) -> XRFrame {
+    var views: [XRView] = []
+    if locatedViews.view_count > 0 {
+        views.append(makeView(locatedViews.left))
+    }
+    if locatedViews.view_count > 1 {
+        views.append(makeView(locatedViews.right))
+    }
+
+    return XRFrame(
+        predictedDisplayTime: timing.predicted_display_time,
+        predictedDisplayPeriod: timing.predicted_display_period,
+        shouldRender: timing.should_render != 0,
+        views: views,
+        trackingState: XRViewTrackingState(
+            orientationValid: locatedViews.orientation_valid != 0,
+            positionValid: locatedViews.position_valid != 0,
+            orientationTracked: locatedViews.orientation_tracked != 0,
+            positionTracked: locatedViews.position_tracked != 0
+        )
+    )
+}
+
 extension XRSession {
     /// Run one OpenXR frame without submitting composition layers.
-    ///
-    /// This is the diagnostic/head-tracking frame path used before SwiftXR has
-    /// swapchain rendering. It performs `xrWaitFrame`, `xrBeginFrame`, locates
-    /// the primary stereo views in `localSpace`, and always completes the frame
-    /// with an empty `xrEndFrame` submission.
     public func nextFrame() throws -> XRFrame {
         guard isRunning else {
             throw XRError.sessionNotRunning
@@ -129,25 +151,138 @@ extension XRSession {
             "xrEndFrame(empty)"
         )
 
-        var views: [XRView] = []
-        if locatedViews.view_count > 0 {
-            views.append(makeView(locatedViews.left))
+        return makeFrame(timing: timing, locatedViews: locatedViews)
+    }
+
+    /// Run one rendered OpenXR frame using a stereo two-layer Metal array swapchain.
+    ///
+    /// SwiftXR owns the OpenXR acquire/wait/release and frame submission sequence.
+    /// The application only encodes Metal work into the supplied command buffer.
+    @discardableResult
+    public func renderFrame(
+        to swapchain: XRSwapchain,
+        encode: (
+            _ frame: XRFrame,
+            _ texture: any MTLTexture,
+            _ commandBuffer: any MTLCommandBuffer
+        ) -> Void
+    ) throws -> XRFrame {
+        guard isRunning else {
+            throw XRError.sessionNotRunning
         }
-        if locatedViews.view_count > 1 {
-            views.append(makeView(locatedViews.right))
+        guard swapchain.session === self else {
+            throw XRSwapchainError.belongsToDifferentSession
         }
 
-        return XRFrame(
-            predictedDisplayTime: timing.predicted_display_time,
-            predictedDisplayPeriod: timing.predicted_display_period,
-            shouldRender: timing.should_render != 0,
-            views: views,
-            trackingState: XRViewTrackingState(
-                orientationValid: locatedViews.orientation_valid != 0,
-                positionValid: locatedViews.position_valid != 0,
-                orientationTracked: locatedViews.orientation_tracked != 0,
-                positionTracked: locatedViews.position_tracked != 0
-            )
+        var timing = SwiftXRFrameTiming()
+        try xrCheck(
+            swiftxr_wait_frame(handle, &timing),
+            "xrWaitFrame"
         )
+
+        try xrCheck(
+            swiftxr_begin_frame(handle),
+            "xrBeginFrame"
+        )
+
+        var locatedViews = SwiftXRLocatedViews()
+        do {
+            try xrCheck(
+                swiftxr_locate_stereo_views(
+                    handle,
+                    localSpace.handle,
+                    timing.predicted_display_time,
+                    &locatedViews
+                ),
+                "xrLocateViews(PRIMARY_STEREO)"
+            )
+        } catch {
+            _ = swiftxr_end_frame_empty(
+                handle,
+                timing.predicted_display_time,
+                environmentBlendMode
+            )
+            throw error
+        }
+
+        let frame = makeFrame(timing: timing, locatedViews: locatedViews)
+
+        guard frame.shouldRender, locatedViews.view_count == 2 else {
+            try xrCheck(
+                swiftxr_end_frame_empty(
+                    handle,
+                    timing.predicted_display_time,
+                    environmentBlendMode
+                ),
+                "xrEndFrame(empty)"
+            )
+            return frame
+        }
+
+        var imageIndex: UInt32 = 0
+        var imageAcquired = false
+
+        do {
+            try xrCheck(
+                swiftxr_acquire_swapchain_image(
+                    swapchain.handle,
+                    &imageIndex
+                ),
+                "xrAcquireSwapchainImage"
+            )
+            imageAcquired = true
+
+            try xrCheck(
+                swiftxr_wait_swapchain_image(swapchain.handle),
+                "xrWaitSwapchainImage"
+            )
+
+            guard Int(imageIndex) < swapchain.textures.count else {
+                throw XRSwapchainError.imageIndexOutOfRange(imageIndex)
+            }
+
+            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+                throw XRSwapchainError.commandBufferCreationFailed
+            }
+
+            encode(
+                frame,
+                swapchain.textures[Int(imageIndex)],
+                commandBuffer
+            )
+            commandBuffer.commit()
+
+            try xrCheck(
+                swiftxr_release_swapchain_image(swapchain.handle),
+                "xrReleaseSwapchainImage"
+            )
+            imageAcquired = false
+        } catch {
+            if imageAcquired {
+                _ = swiftxr_release_swapchain_image(swapchain.handle)
+            }
+            _ = swiftxr_end_frame_empty(
+                handle,
+                timing.predicted_display_time,
+                environmentBlendMode
+            )
+            throw error
+        }
+
+        try xrCheck(
+            swiftxr_end_frame_projection(
+                handle,
+                localSpace.handle,
+                swapchain.handle,
+                timing.predicted_display_time,
+                environmentBlendMode,
+                &locatedViews,
+                swapchain.width,
+                swapchain.height
+            ),
+            "xrEndFrame(projection)"
+        )
+
+        return frame
     }
 }
