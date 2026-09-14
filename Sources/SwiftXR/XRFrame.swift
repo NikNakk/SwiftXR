@@ -251,6 +251,7 @@ extension XRSession {
                 commandBuffer
             )
             commandBuffer.commit()
+            swapchain.lastCommandBuffer = commandBuffer
 
             try xrCheck(
                 swiftxr_release_swapchain_image(swapchain.handle),
