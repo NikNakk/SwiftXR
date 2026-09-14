@@ -1,3 +1,4 @@
+import Darwin
 import Metal
 import simd
 import SwiftXR
@@ -124,13 +125,13 @@ final class LogoRenderer {
 
             vertices.append(
                 LogoVertex(
-                    position: center + SIMD3(cos(a0) * radius, sin(a0) * radius, 0),
+                    position: center + SIMD3(cosf(a0) * radius, sinf(a0) * radius, 0),
                     color: color
                 )
             )
             vertices.append(
                 LogoVertex(
-                    position: center + SIMD3(cos(a1) * radius, sin(a1) * radius, 0),
+                    position: center + SIMD3(cosf(a1) * radius, sinf(a1) * radius, 0),
                     color: color
                 )
             )
@@ -159,7 +160,7 @@ final class LogoRenderer {
         let halfLength: Float = 0.34
         let halfWidth: Float = 0.07
         let center = SIMD3<Float>(0, 0, -1.80)
-        let direction = SIMD2<Float>(cos(angle), sin(angle))
+        let direction = SIMD2<Float>(cosf(angle), sinf(angle))
         let normal = SIMD2<Float>(-direction.y, direction.x)
 
         func point(_ along: Float, _ across: Float) -> SIMD3<Float> {
