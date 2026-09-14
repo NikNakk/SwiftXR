@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "SwiftXR", targets: ["SwiftXR"]),
         .executable(name: "swiftxr-probe", targets: ["SwiftXRProbe"]),
+        .executable(name: "hello-swiftxr", targets: ["HelloSwiftXR"]),
     ],
     targets: [
         .systemLibrary(
@@ -23,6 +24,11 @@ let package = Package(
         .executableTarget(
             name: "SwiftXRProbe",
             dependencies: ["SwiftXR"]
+        ),
+        .executableTarget(
+            name: "HelloSwiftXR",
+            dependencies: ["SwiftXR"],
+            path: "Examples/HelloSwiftXR"
         ),
     ]
 )
