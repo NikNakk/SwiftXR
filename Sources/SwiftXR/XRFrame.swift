@@ -165,7 +165,7 @@ extension XRSession {
             _ frame: XRFrame,
             _ texture: any MTLTexture,
             _ commandBuffer: any MTLCommandBuffer
-        ) -> Void
+        ) throws -> Void
     ) throws -> XRFrame {
         guard isRunning else {
             throw XRError.sessionNotRunning
@@ -245,7 +245,7 @@ extension XRSession {
                 throw XRSwapchainError.commandBufferCreationFailed
             }
 
-            encode(
+            try encode(
                 frame,
                 swapchain.textures[Int(imageIndex)],
                 commandBuffer
