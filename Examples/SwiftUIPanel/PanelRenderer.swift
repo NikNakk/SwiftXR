@@ -34,7 +34,7 @@ final class PanelRenderer {
         descriptor.colorAttachments[0].isBlendingEnabled = true
         descriptor.colorAttachments[0].rgbBlendOperation = .add
         descriptor.colorAttachments[0].alphaBlendOperation = .add
-        descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        descriptor.colorAttachments[0].sourceRGBBlendFactor = .one
         descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
         descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
