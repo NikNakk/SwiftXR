@@ -10,7 +10,7 @@
 - Expose Metal objects as normal Swift/Metal objects at the public API boundary.
 - Keep the framework below the level of a scene engine. SwiftXR should be closer to MetalKit than to Unity, Godot or RealityKit.
 
-## Current milestone: rendered stereo projection
+## Current milestone: world-locked stereo Metal rendering
 
 SwiftXR can now:
 
@@ -26,8 +26,12 @@ SwiftXR can now:
 10. Create one stereo OpenXR swapchain with `arraySize=2` and bridge its `XrSwapchainImageMetalKHR` images to `MTLTextureType2DArray` textures.
 11. Own the acquire/wait/Metal-submit/release sequence for each rendered frame.
 12. Submit an `XrCompositionLayerProjection` whose two views use array slices 0 and 1.
+13. Convert OpenXR poses and asymmetric FOVs into Metal-compatible view/projection matrices.
+14. Render a true world-locked 3D scene independently for each eye.
 
 The rendered-frame API hands application code an `XRFrame`, the acquired two-layer `MTLTexture`, and an `MTLCommandBuffer`. SwiftXR keeps the OpenXR swapchain/frame state machine out of the application and waits for the final Metal command buffer before destroying the swapchain.
+
+`XRView` now exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`. The projection helper converts OpenXR's right-handed, -Z-forward asymmetric FOV into Metal's 0...1 normalized depth convention.
 
 The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
 
@@ -35,7 +39,9 @@ On macOS, a default CMake installation of the Khronos OpenXR loader commonly pla
 
 ## Example program
 
-`Examples/HelloSwiftXR/main.swift` is a small application using only the public SwiftXR API. It creates a real Metal-backed OpenXR session and stereo array swapchain, then renders 360 projection frames. For this first visual checkpoint, both eye slices are cleared to the same smoothly pulsing blue colour before the projection layer is submitted.
+`Examples/HelloSwiftXR` is a small native Swift + Metal application built entirely on the public SwiftXR API. It creates a Metal-backed OpenXR session and stereo array swapchain, then renders a static coloured cube over a floor grid using the live per-eye OpenXR view poses and FOVs.
+
+The scene is deliberately anchored in `LOCAL` space. The grid is placed approximately 1.5 m below the local origin and the cube roughly 2 m in front of it, so rotating, translating, leaning, or looking around the object should visibly demonstrate 6DoF world locking.
 
 Run it with:
 
@@ -54,12 +60,13 @@ Metal device: <Apple GPU name>
 LOCAL reference space: created
 Stereo swapchain: <width>x<height>, images=<count>, arraySize=2
 Swapchain Metal pixel format: <format>
+World renderer: cube + floor grid ready
 Session state: ready
 Session running: yes
-Rendering 360 stereo projection frames; the headset should show a pulsing blue field
+Rendering 900 world-locked stereo frames; move and lean around the cube
 Frame 0: views=2 shouldRender=true period=<period>ms
 ...
-Completed 360 rendered OpenXR frames
+Completed 900 world-rendered OpenXR frames
 Requesting clean session exit
 Session state: stopping
 Session state: exiting
@@ -74,27 +81,25 @@ swift run swiftxr-probe
 
 ## Intended v0.1 API boundary
 
-The application-facing shape should converge on something like:
+The application-facing shape is converging on:
 
 ```swift
-import Metal
-import SwiftXR
+let swapchain = try session.makeStereoSwapchain()
 
-let app = try XRApplication()
-
-try app.run { frame, commandBuffer in
-    for view in frame.views {
+try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
+    for eye in frame.views.indices {
         renderScene(
-            into: view.texture,
-            viewMatrix: view.viewMatrix,
-            projectionMatrix: view.projectionMatrix,
+            into: texture,
+            arraySlice: eye,
+            viewMatrix: frame.views[eye].viewMatrix,
+            projectionMatrix: frame.views[eye].projectionMatrix(),
             commandBuffer: commandBuffer
         )
     }
 }
 ```
 
-The exact naming is intentionally not frozen yet. The important boundary is that application code should receive predicted frame timing, located views and Metal render targets without manually driving the OpenXR frame and swapchain state machines.
+Application code receives predicted frame timing, located views, Metal render targets and matrices without manually driving the OpenXR frame or swapchain state machines.
 
 ## v0.1 implementation sequence
 
@@ -104,7 +109,8 @@ The exact naming is intentionally not frozen yet. The important boundary is that
 4. ✅ `XRFrame`: wrap `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews` and frame submission with predicted timing and Swift view values.
 5. ✅ `XRSwapchain`: create and enumerate a stereo Metal array swapchain and expose its `MTLTexture` images safely.
 6. ✅ Submit a real stereo projection layer from Swift/Metal through OpenXR.
-7. Next: replace the diagnostic clear with a small world-space scene and add view/projection matrix helpers.
+7. ✅ Add Metal view/projection matrix helpers and a world-locked 6DoF sample scene.
+8. Next: refine the application-facing frame/render API, then add actions/controllers and haptics.
 
 Input/actions, controllers, haptics, hand tracking and higher-level scene helpers are deliberately post-v0.1. They should be layered on after the rendering/session API has settled.
 
