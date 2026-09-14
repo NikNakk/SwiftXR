@@ -28,10 +28,13 @@ SwiftXR can now:
 12. Submit an `XrCompositionLayerProjection` whose two views use array slices 0 and 1.
 13. Convert OpenXR poses and asymmetric FOVs into Metal-compatible view/projection matrices.
 14. Render a true world-locked 3D scene independently for each eye.
+15. Rasterize display-only SwiftUI views into reusable Metal textures with `XRSwiftUIPanel`.
 
 The rendered-frame API hands application code an `XRFrame`, the acquired two-layer `MTLTexture`, and an `MTLCommandBuffer`. SwiftXR keeps the OpenXR swapchain/frame state machine out of the application and waits for the final Metal command buffer before destroying the swapchain.
 
-`XRView` now exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`. The projection helper converts OpenXR's right-handed, -Z-forward asymmetric FOV into Metal's 0...1 normalized depth convention.
+`XRView` exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`. The projection helper converts OpenXR's right-handed, -Z-forward asymmetric FOV into Metal's 0...1 normalized depth convention.
+
+`XRSwiftUIPanel` uses SwiftUI `ImageRenderer` to rasterize a view into an sRGB Metal texture. The texture is reused across XR frames and is only regenerated when `refresh()` is called, so mostly-static UI does not need to be rasterized at headset refresh rate.
 
 The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
 
@@ -47,30 +50,6 @@ Run it with:
 
 ```sh
 swift run hello-swiftxr
-```
-
-A successful run should include output similar to:
-
-```text
-Hello from SwiftXR
-Metal graphics support: yes
-Runtime: Monado <version>
-System: <HMD name>
-Metal device: <Apple GPU name>
-LOCAL reference space: created
-Stereo swapchain: <width>x<height>, images=<count>, arraySize=2
-Swapchain Metal pixel format: <format>
-World renderer: cube + floor grid ready
-Session state: ready
-Session running: yes
-Rendering 900 world-locked stereo frames; move and lean around the cube
-Frame 0: views=2 shouldRender=true period=<period>ms
-...
-Completed 900 world-rendered OpenXR frames
-Requesting clean session exit
-Session state: stopping
-Session state: exiting
-Session exit acknowledged by runtime
 ```
 
 ## Minimal example
@@ -102,6 +81,39 @@ Run it with:
 ```sh
 swift run minimal-swiftxr-logo
 ```
+
+## SwiftUI panel example
+
+`Examples/SwiftUIPanel` proves that normal macOS SwiftUI can be used as a display surface inside OpenXR. The sample builds a card from ordinary `Image`, `Text`, `VStack`, `LinearGradient`, and rounded-shape views, rasterizes it once with `XRSwiftUIPanel`, then places the resulting Metal texture on a world-locked quad roughly 1.8 m in front of the user.
+
+The SwiftUI side is ordinary SwiftUI:
+
+```swift
+let panel = try XRSwiftUIPanel(
+    device: session.device,
+    pointSize: CGSize(width: 496, height: 296),
+    scale: 2
+) {
+    VStack(spacing: 12) {
+        Image(systemName: "swift")
+            .font(.system(size: 64))
+            .foregroundStyle(.orange)
+
+        Text("SwiftXR")
+            .font(.system(size: 48, weight: .bold, design: .rounded))
+
+        Text("SwiftUI → Metal → OpenXR")
+    }
+}
+```
+
+Run it with:
+
+```sh
+swift run swiftui-panel
+```
+
+This first bridge is display-only. A future interaction layer can map controller-ray hits into panel-local coordinates and feed them back into hosted SwiftUI controls.
 
 There is also a smaller loader/runtime diagnostic executable:
 
@@ -140,7 +152,8 @@ Application code receives predicted frame timing, located views, Metal render ta
 5. ✅ `XRSwapchain`: create and enumerate a stereo Metal array swapchain and expose its `MTLTexture` images safely.
 6. ✅ Submit a real stereo projection layer from Swift/Metal through OpenXR.
 7. ✅ Add Metal view/projection matrix helpers and a world-locked 6DoF sample scene.
-8. Next: refine the application-facing frame/render API, then add actions/controllers and haptics.
+8. ✅ Add display-only SwiftUI panel rasterization and a world-space SwiftUI example.
+9. Next: refine the application-facing frame/render API, then add actions/controllers and haptics.
 
 Input/actions, controllers, haptics, hand tracking and higher-level scene helpers are deliberately post-v0.1. They should be layered on after the rendering/session API has settled.
 
