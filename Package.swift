@@ -2,6 +2,13 @@
 
 import PackageDescription
 
+let openXRExecutableLinkerSettings: [LinkerSetting] = [
+    .unsafeFlags(
+        ["-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib"],
+        .when(platforms: [.macOS])
+    )
+]
+
 let package = Package(
     name: "SwiftXR",
     platforms: [
@@ -23,12 +30,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "SwiftXRProbe",
-            dependencies: ["SwiftXR"]
+            dependencies: ["SwiftXR"],
+            linkerSettings: openXRExecutableLinkerSettings
         ),
         .executableTarget(
             name: "HelloSwiftXR",
             dependencies: ["SwiftXR"],
-            path: "Examples/HelloSwiftXR"
+            path: "Examples/HelloSwiftXR",
+            linkerSettings: openXRExecutableLinkerSettings
         ),
     ]
 )
