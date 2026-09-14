@@ -10,7 +10,7 @@
 - Expose Metal objects as normal Swift/Metal objects at the public API boundary.
 - Keep the framework below the level of a scene engine. SwiftXR should be closer to MetalKit than to Unity, Godot or RealityKit.
 
-## Current milestone: instance and system discovery
+## Current milestone: Metal session lifecycle
 
 SwiftXR can now:
 
@@ -20,8 +20,11 @@ SwiftXR can now:
 4. Select a head-mounted-display system through `XRSystem`.
 5. Expose useful system graphics/tracking properties.
 6. Call `xrGetMetalGraphicsRequirementsKHR` and bridge the runtime-provided Metal device to a normal Swift `MTLDevice`.
-
-The Metal device returned by the runtime is important: the command queue passed to the future Metal-backed OpenXR session must be created from that device.
+7. Create an `MTLCommandQueue` from that exact runtime-provided device and use it in `XrGraphicsBindingMetalKHR`.
+8. Create and destroy a Metal-backed OpenXR session through `XRSession`.
+9. Create the required core `LOCAL` reference space.
+10. Poll OpenXR events and automatically perform the required `READY` → `xrBeginSession` and `STOPPING` → `xrEndSession` lifecycle transitions.
+11. Surface `EXITING`, `LOSS_PENDING`, and instance-loss conditions through `shouldExit`.
 
 The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
 
@@ -29,7 +32,7 @@ On macOS, a default CMake installation of the Khronos OpenXR loader commonly pla
 
 ## Example program
 
-`Examples/HelloSwiftXR/main.swift` is a deliberately small application using only the public SwiftXR API. It now opens the runtime far enough to identify the runtime, HMD system and required Metal device.
+`Examples/HelloSwiftXR/main.swift` is a deliberately small application using only the public SwiftXR API. It now creates a real Metal-backed OpenXR session, creates a `LOCAL` reference space, waits for the runtime to move the session to `READY`, begins the primary stereo session, then requests a clean exit and follows the runtime lifecycle back toward `EXITING`.
 
 Run it with:
 
@@ -50,10 +53,19 @@ Max compositor layers: <count>
 Orientation tracking: yes
 Position tracking: yes
 Metal device: <Apple GPU name>
-Ready to create a Metal-backed OpenXR session.
+Metal command queue: created
+LOCAL reference space: created
+Initial session state: idle
+Session state: ready
+Session running: yes
+Requesting clean session exit
+Session state: stopping
+Session state: idle
+Session state: exiting
+Session exit acknowledged by runtime
 ```
 
-It does not yet create an OpenXR session or render into the headset. The next milestone is `XRSession`, reference-space creation and session-state handling.
+The example deliberately does not submit frames yet. The next milestone is the frame loop: `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, and `xrEndFrame`.
 
 There is also a smaller loader/runtime diagnostic executable:
 
@@ -89,7 +101,7 @@ The exact naming is intentionally not frozen yet. The important boundary is that
 
 1. ✅ `XRInstance`: create/destroy an instance with `XR_KHR_metal_enable` and expose runtime properties.
 2. ✅ `XRSystem`: select the HMD system, expose system properties and query the required Metal device.
-3. `XRSession`: create a command queue from the runtime-provided `MTLDevice`, create the Metal session, handle OpenXR session-state transitions and reference spaces.
+3. ✅ `XRSession`: create a command queue from the runtime-provided `MTLDevice`, create the Metal session, handle OpenXR session-state transitions and create a `LOCAL` reference space.
 4. `XRFrameLoop`: wrap `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews` and `xrEndFrame` with predicted display timing.
 5. `XRSwapchain`: create the stereo Metal swapchain, enumerate `XrSwapchainImageMetalKHR`, and expose the resulting `MTLTexture` objects safely.
 6. Evolve `hello-swiftxr` into a minimal stereo scene and prove head-tracked presentation through an OpenXR runtime on macOS.
