@@ -7,6 +7,7 @@ public enum XRError: Error, CustomStringConvertible, Sendable {
     case unexpectedNull(String)
     case metalDeviceBridgeFailed
     case metalCommandQueueCreationFailed
+    case sessionNotRunning
 
     public var description: String {
         switch self {
@@ -20,6 +21,8 @@ public enum XRError: Error, CustomStringConvertible, Sendable {
             return "The OpenXR runtime's Metal device could not be bridged to MTLDevice"
         case .metalCommandQueueCreationFailed:
             return "Could not create a Metal command queue from the OpenXR runtime's MTLDevice"
+        case .sessionNotRunning:
+            return "The OpenXR session is not running"
         }
     }
 }
