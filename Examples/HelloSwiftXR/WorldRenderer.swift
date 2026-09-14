@@ -5,6 +5,7 @@ import SwiftXR
 enum WorldRendererError: Error, CustomStringConvertible {
     case shaderFunctionMissing(String)
     case bufferCreationFailed(String)
+    case depthStateCreationFailed
     case depthTextureCreationFailed
     case renderEncoderCreationFailed
 
@@ -14,6 +15,8 @@ enum WorldRendererError: Error, CustomStringConvertible {
             return "Metal shader function not found: \(name)"
         case let .bufferCreationFailed(name):
             return "Could not create Metal buffer: \(name)"
+        case .depthStateCreationFailed:
+            return "Could not create the depth state for the SwiftXR sample scene"
         case .depthTextureCreationFailed:
             return "Could not create the depth texture for the SwiftXR sample scene"
         case .renderEncoderCreationFailed:
@@ -64,7 +67,7 @@ final class WorldRenderer {
         depthDescriptor.depthCompareFunction = .less
         depthDescriptor.isDepthWriteEnabled = true
         guard let depthState = device.makeDepthStencilState(descriptor: depthDescriptor) else {
-            throw WorldRendererError.depthTextureCreationFailed
+            throw WorldRendererError.depthStateCreationFailed
         }
         self.depthState = depthState
 
@@ -74,12 +77,12 @@ final class WorldRenderer {
             height: Int(swapchain.height),
             mipmapped: false
         )
-        textureDescriptor.label = "SwiftXR world depth texture"
         textureDescriptor.storageMode = .private
         textureDescriptor.usage = [.renderTarget]
         guard let depthTexture = device.makeTexture(descriptor: textureDescriptor) else {
             throw WorldRendererError.depthTextureCreationFailed
         }
+        depthTexture.label = "SwiftXR world depth texture"
         self.depthTexture = depthTexture
 
         let cubeVertices = Self.makeCubeVertices()
