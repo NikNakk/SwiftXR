@@ -1,16 +1,29 @@
+import Metal
 import SwiftXR
 
 print("Hello from SwiftXR")
 
 let capabilities = try XRRuntime.capabilities()
 
-print("\nActive OpenXR runtime extensions:")
-for extensionInfo in capabilities.extensions.sorted(by: { $0.name < $1.name }) {
-    print("  \(extensionInfo.name) (v\(extensionInfo.version))")
-}
-
 let metalSupport = capabilities.supportsMetal ? "yes" : "no"
-print("\nMetal graphics support: \(metalSupport)")
+print("Metal graphics support: \(metalSupport)")
 try capabilities.requireMetal()
 
-print("\nSwiftXR is ready to create a Metal-backed OpenXR session once session support is implemented.")
+let instance = try XRInstance(applicationName: "HelloSwiftXR")
+print("Runtime: \(instance.runtime.name) \(instance.runtime.version)")
+
+let system = try instance.system()
+print("System: \(system.info.name)")
+print("Vendor ID: \(system.info.vendorID)")
+print(
+    "Max swapchain image: " +
+    "\(system.info.maxSwapchainImageWidth)x\(system.info.maxSwapchainImageHeight)"
+)
+print("Max compositor layers: \(system.info.maxLayerCount)")
+print("Orientation tracking: \(system.info.supportsOrientationTracking ? "yes" : "no")")
+print("Position tracking: \(system.info.supportsPositionTracking ? "yes" : "no")")
+
+let device: any MTLDevice = try system.metalDevice()
+print("Metal device: \(device.name)")
+
+print("Ready to create a Metal-backed OpenXR session.")
