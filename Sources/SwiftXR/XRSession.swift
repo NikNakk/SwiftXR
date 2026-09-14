@@ -44,6 +44,7 @@ public final class XRReferenceSpace {
 
 public final class XRSession {
     let handle: UnsafeMutableRawPointer
+    let environmentBlendMode: Int32
 
     public let system: XRSystem
     public let device: any MTLDevice
@@ -96,10 +97,27 @@ public final class XRSession {
             throw XRError.unexpectedNull("LOCAL XrSpace")
         }
 
+        var blendMode: Int32 = 0
+        do {
+            try xrCheck(
+                swiftxr_choose_environment_blend_mode(
+                    system.instance.handle,
+                    system.systemID,
+                    &blendMode
+                ),
+                "xrEnumerateEnvironmentBlendModes"
+            )
+        } catch {
+            _ = swiftxr_destroy_space(localSpaceHandle)
+            _ = swiftxr_destroy_session(sessionHandle)
+            throw error
+        }
+
         self.system = system
         self.device = device
         self.commandQueue = commandQueue
         self.handle = sessionHandle
+        self.environmentBlendMode = blendMode
         self.localSpace = XRReferenceSpace(
             handle: localSpaceHandle,
             type: .local
