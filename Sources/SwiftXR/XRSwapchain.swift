@@ -39,6 +39,7 @@ public final class XRSwapchain {
     let handle: UnsafeMutableRawPointer
     let session: XRSession
     let textures: [any MTLTexture]
+    var lastCommandBuffer: (any MTLCommandBuffer)?
 
     public let viewConfiguration: XRViewConfiguration
     public let width: UInt32
@@ -158,6 +159,7 @@ public final class XRSwapchain {
     }
 
     deinit {
+        lastCommandBuffer?.waitUntilCompleted()
         _ = swiftxr_destroy_swapchain(handle)
     }
 }
