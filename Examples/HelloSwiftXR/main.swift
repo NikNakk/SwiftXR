@@ -2,6 +2,20 @@ import Foundation
 import Metal
 import SwiftXR
 
+func format(_ value: Float) -> String {
+    String(format: "%.3f", value)
+}
+
+func formatPosition(_ pose: XRPose) -> String {
+    let p = pose.position
+    return "(\(format(p.x)), \(format(p.y)), \(format(p.z)))"
+}
+
+func formatOrientation(_ pose: XRPose) -> String {
+    let q = pose.orientation
+    return "(\(format(q.x)), \(format(q.y)), \(format(q.z)), \(format(q.w)))"
+}
+
 print("Hello from SwiftXR")
 
 let capabilities = try XRRuntime.capabilities()
@@ -49,8 +63,55 @@ while !session.isRunning && !session.shouldExit && Date() < startDeadline {
 
 if session.isRunning {
     print("Session running: yes")
-    print("Requesting clean session exit")
-    try session.requestExit()
+    print("Running 360 zero-layer frames; move the headset to exercise live view poses")
+
+    var frameIndex = 0
+    while frameIndex < 360 && session.isRunning && !session.shouldExit {
+        for state in try session.pollEvents() where state != lastPrintedState {
+            print("Session state: \(state)")
+            lastPrintedState = state
+        }
+
+        guard session.isRunning && !session.shouldExit else {
+            break
+        }
+
+        let frame = try session.nextFrame()
+
+        if frameIndex % 30 == 0 {
+            let periodMilliseconds = Double(frame.predictedDisplayPeriod) / 1_000_000.0
+            print(
+                "Frame \(frameIndex): views=\(frame.views.count) " +
+                "shouldRender=\(frame.shouldRender) " +
+                String(format: "period=%.3fms", periodMilliseconds)
+            )
+
+            if frame.views.count >= 2 {
+                let left = frame.views[0]
+                let right = frame.views[1]
+                print("  left  position: \(formatPosition(left.pose))")
+                print("  right position: \(formatPosition(right.pose))")
+                print("  left orientation xyzw: \(formatOrientation(left.pose))")
+            }
+
+            let tracking = frame.trackingState
+            print(
+                "  tracking: orientation valid=\(tracking.orientationValid) " +
+                "tracked=\(tracking.orientationTracked); " +
+                "position valid=\(tracking.positionValid) " +
+                "tracked=\(tracking.positionTracked)"
+            )
+        }
+
+        frameIndex += 1
+    }
+
+    print("Completed \(frameIndex) OpenXR frames")
+
+    if session.isRunning && !session.shouldExit {
+        print("Requesting clean session exit")
+        try session.requestExit()
+    }
 
     let exitDeadline = Date().addingTimeInterval(5)
     while !session.shouldExit && Date() < exitDeadline {
