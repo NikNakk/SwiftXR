@@ -30,22 +30,8 @@ final class LogoRenderer {
         let mark = Self.makeMark()
         ringVertexCount = ring.count
         markVertexCount = mark.count
-
-        guard
-            let ringBuffer = device.makeBuffer(
-                bytes: ring,
-                length: ring.count * MemoryLayout<LogoVertex>.stride
-            ),
-            let markBuffer = device.makeBuffer(
-                bytes: mark,
-                length: mark.count * MemoryLayout<LogoVertex>.stride
-            )
-        else {
-            throw LogoRendererError.bufferCreationFailed
-        }
-
-        self.ringBuffer = ringBuffer
-        self.markBuffer = markBuffer
+        ringBuffer = try Self.makeBuffer(device: device, values: ring)
+        markBuffer = try Self.makeBuffer(device: device, values: mark)
     }
 
     func encode(
@@ -105,6 +91,25 @@ final class LogoRenderer {
         }
     }
 
+    private static func makeBuffer<T>(
+        device: any MTLDevice,
+        values: [T]
+    ) throws -> any MTLBuffer {
+        let buffer = values.withUnsafeBufferPointer { pointer -> (any MTLBuffer)? in
+            guard let baseAddress = pointer.baseAddress else { return nil }
+            return device.makeBuffer(
+                bytes: baseAddress,
+                length: pointer.count * MemoryLayout<T>.stride,
+                options: []
+            )
+        }
+
+        guard let buffer else {
+            throw LogoRendererError.bufferCreationFailed
+        }
+        return buffer
+    }
+
     private static func makeRing() -> [LogoVertex] {
         let segments = 96
         let radius: Float = 0.48
@@ -114,8 +119,8 @@ final class LogoRenderer {
         vertices.reserveCapacity(segments * 2)
 
         for index in 0..<segments {
-            let a0 = Float(index) / Float(segments) * 2 * .pi
-            let a1 = Float(index + 1) / Float(segments) * 2 * .pi
+            let a0 = Float(index) / Float(segments) * 2 * Float.pi
+            let a1 = Float(index + 1) / Float(segments) * 2 * Float.pi
 
             vertices.append(
                 LogoVertex(
@@ -137,11 +142,11 @@ final class LogoRenderer {
     private static func makeMark() -> [LogoVertex] {
         var vertices: [LogoVertex] = []
         vertices += makeBar(
-            angle: .pi / 4,
+            angle: Float.pi / 4,
             color: SIMD3<Float>(1.00, 0.30, 0.20)
         )
         vertices += makeBar(
-            angle: -.pi / 4,
+            angle: -Float.pi / 4,
             color: SIMD3<Float>(0.20, 0.78, 1.00)
         )
         return vertices
@@ -163,9 +168,9 @@ final class LogoRenderer {
         }
 
         let a = point(-halfLength, -halfWidth)
-        let b = point( halfLength, -halfWidth)
-        let c = point( halfLength,  halfWidth)
-        let d = point(-halfLength,  halfWidth)
+        let b = point(halfLength, -halfWidth)
+        let c = point(halfLength, halfWidth)
+        let d = point(-halfLength, halfWidth)
 
         return [
             LogoVertex(position: a, color: color),
