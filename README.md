@@ -10,25 +10,24 @@
 - Expose Metal objects as normal Swift/Metal objects at the public API boundary.
 - Keep the framework below the level of a scene engine. SwiftXR should be closer to MetalKit than to Unity, Godot or RealityKit.
 
-## Current milestone: live OpenXR frame loop
+## Current milestone: rendered stereo projection
 
 SwiftXR can now:
 
 1. Enumerate runtime extensions and require `XR_KHR_metal_enable`.
-2. Create and destroy an OpenXR instance through `XRInstance`.
-3. Expose the runtime name and version.
-4. Select a head-mounted-display system through `XRSystem`.
-5. Expose useful system graphics/tracking properties.
-6. Call `xrGetMetalGraphicsRequirementsKHR` and bridge the runtime-provided Metal device to a normal Swift `MTLDevice`.
-7. Create an `MTLCommandQueue` from that exact runtime-provided device and use it in `XrGraphicsBindingMetalKHR`.
-8. Create and destroy a Metal-backed OpenXR session through `XRSession`.
-9. Create the required core `LOCAL` reference space.
-10. Poll OpenXR events and automatically perform the required `READY` → `xrBeginSession` and `STOPPING` → `xrEndSession` lifecycle transitions.
-11. Surface `EXITING`, `LOSS_PENDING`, and instance-loss conditions through `shouldExit`.
-12. Run paced OpenXR frames through `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, and `xrEndFrame`.
-13. Expose predicted display timing, `shouldRender`, stereo poses/FOVs, and view tracking validity as Swift value types.
+2. Create/destroy an OpenXR instance and expose runtime properties.
+3. Select an HMD system and expose graphics/tracking properties.
+4. Obtain the runtime-selected `MTLDevice` and create the required command queue from it.
+5. Create a Metal-backed OpenXR session and `LOCAL` reference space.
+6. Handle the core OpenXR session lifecycle and exit conditions.
+7. Run paced frames through `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, and `xrEndFrame`.
+8. Expose predicted timing, stereo poses/FOVs, and view-tracking validity as Swift values.
+9. Query recommended stereo view dimensions and runtime-supported Metal swapchain formats.
+10. Create one stereo OpenXR swapchain with `arraySize=2` and bridge its `XrSwapchainImageMetalKHR` images to `MTLTextureType2DArray` textures.
+11. Own the acquire/wait/Metal-submit/release sequence for each rendered frame.
+12. Submit an `XrCompositionLayerProjection` whose two views use array slices 0 and 1.
 
-The current frame path deliberately submits zero composition layers. That isolates frame timing and head tracking from swapchain/rendering work before the first visual sample is added.
+The rendered-frame API hands application code an `XRFrame`, the acquired two-layer `MTLTexture`, and an `MTLCommandBuffer`. SwiftXR keeps the OpenXR swapchain/frame state machine out of the application and waits for the final Metal command buffer before destroying the swapchain.
 
 The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
 
@@ -36,7 +35,7 @@ On macOS, a default CMake installation of the Khronos OpenXR loader commonly pla
 
 ## Example program
 
-`Examples/HelloSwiftXR/main.swift` is a deliberately small application using only the public SwiftXR API. It creates a real Metal-backed OpenXR session, creates a `LOCAL` reference space, waits for `READY`, then runs 360 zero-layer frames while printing live stereo view poses and tracking validity before requesting a clean session exit.
+`Examples/HelloSwiftXR/main.swift` is a small application using only the public SwiftXR API. It creates a real Metal-backed OpenXR session and stereo array swapchain, then renders 360 projection frames. For this first visual checkpoint, both eye slices are cleared to the same smoothly pulsing blue colour before the projection layer is submitted.
 
 Run it with:
 
@@ -53,16 +52,14 @@ Runtime: Monado <version>
 System: <HMD name>
 Metal device: <Apple GPU name>
 LOCAL reference space: created
+Stereo swapchain: <width>x<height>, images=<count>, arraySize=2
+Swapchain Metal pixel format: <format>
 Session state: ready
 Session running: yes
-Running 360 zero-layer frames; move the headset to exercise live view poses
+Rendering 360 stereo projection frames; the headset should show a pulsing blue field
 Frame 0: views=2 shouldRender=true period=<period>ms
-  left  position: (...)
-  right position: (...)
-  left orientation xyzw: (...)
-  tracking: orientation valid=true tracked=true; position valid=true tracked=true
 ...
-Completed 360 OpenXR frames
+Completed 360 rendered OpenXR frames
 Requesting clean session exit
 Session state: stopping
 Session state: exiting
@@ -103,10 +100,11 @@ The exact naming is intentionally not frozen yet. The important boundary is that
 
 1. ✅ `XRInstance`: create/destroy an instance with `XR_KHR_metal_enable` and expose runtime properties.
 2. ✅ `XRSystem`: select the HMD system, expose system properties and query the required Metal device.
-3. ✅ `XRSession`: create a command queue from the runtime-provided `MTLDevice`, create the Metal session, handle OpenXR session-state transitions and create a `LOCAL` reference space.
-4. ✅ `XRFrame`: wrap `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews` and zero-layer `xrEndFrame` with predicted timing and Swift view values.
-5. `XRSwapchain`: create the stereo Metal swapchain, enumerate `XrSwapchainImageMetalKHR`, and expose the resulting `MTLTexture` objects safely.
-6. Evolve `hello-swiftxr` into a minimal stereo scene and prove head-tracked presentation through an OpenXR runtime on macOS.
+3. ✅ `XRSession`: create a command queue from the runtime-provided `MTLDevice`, create the Metal session, handle session-state transitions and create a `LOCAL` reference space.
+4. ✅ `XRFrame`: wrap `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews` and frame submission with predicted timing and Swift view values.
+5. ✅ `XRSwapchain`: create and enumerate a stereo Metal array swapchain and expose its `MTLTexture` images safely.
+6. ✅ Submit a real stereo projection layer from Swift/Metal through OpenXR.
+7. Next: replace the diagnostic clear with a small world-space scene and add view/projection matrix helpers.
 
 Input/actions, controllers, haptics, hand tracking and higher-level scene helpers are deliberately post-v0.1. They should be layered on after the rendering/session API has settled.
 
