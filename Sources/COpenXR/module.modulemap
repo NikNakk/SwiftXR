@@ -1,0 +1,5 @@
+module COpenXR [system] {
+    header "shim.h"
+    link "openxr_loader"
+    export *
+}
