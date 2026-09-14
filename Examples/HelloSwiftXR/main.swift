@@ -11,34 +11,6 @@ func formatPosition(_ pose: XRPose) -> String {
     return "(\(format(p.x)), \(format(p.y)), \(format(p.z)))"
 }
 
-func encodeTestField(
-    texture: any MTLTexture,
-    commandBuffer: any MTLCommandBuffer,
-    frameIndex: Int
-) {
-    let pulse = 0.5 + 0.5 * sin(Double(frameIndex) * 0.04)
-    let clearColor = MTLClearColor(
-        red: 0.04 + 0.05 * pulse,
-        green: 0.12 + 0.28 * pulse,
-        blue: 0.22 + 0.45 * pulse,
-        alpha: 1.0
-    )
-
-    for eye in 0..<2 {
-        let descriptor = MTLRenderPassDescriptor()
-        descriptor.colorAttachments[0].texture = texture
-        descriptor.colorAttachments[0].slice = eye
-        descriptor.colorAttachments[0].level = 0
-        descriptor.colorAttachments[0].loadAction = .clear
-        descriptor.colorAttachments[0].storeAction = .store
-        descriptor.colorAttachments[0].clearColor = clearColor
-
-        if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) {
-            encoder.endEncoding()
-        }
-    }
-}
-
 print("Hello from SwiftXR")
 
 let capabilities = try XRRuntime.capabilities()
@@ -79,6 +51,10 @@ print(
     "left \(swapchain.viewConfiguration.leftWidth)x\(swapchain.viewConfiguration.leftHeight), " +
     "right \(swapchain.viewConfiguration.rightWidth)x\(swapchain.viewConfiguration.rightHeight)"
 )
+
+let renderer = try WorldRenderer(device: session.device, swapchain: swapchain)
+print("World renderer: cube + floor grid ready")
+print("The grid is placed 1.5 m below the LOCAL-space origin")
 print("Initial session state: \(session.state)")
 
 let startDeadline = Date().addingTimeInterval(10)
@@ -97,10 +73,10 @@ while !session.isRunning && !session.shouldExit && Date() < startDeadline {
 
 if session.isRunning {
     print("Session running: yes")
-    print("Rendering 360 stereo projection frames; the headset should show a pulsing blue field")
+    print("Rendering 900 world-locked stereo frames; move and lean around the cube")
 
     var frameIndex = 0
-    while frameIndex < 360 && session.isRunning && !session.shouldExit {
+    while frameIndex < 900 && session.isRunning && !session.shouldExit {
         for state in try session.pollEvents() where state != lastPrintedState {
             print("Session state: \(state)")
             lastPrintedState = state
@@ -110,16 +86,15 @@ if session.isRunning {
             break
         }
 
-        let currentFrame = frameIndex
-        let frame = try session.renderFrame(to: swapchain) { _, texture, commandBuffer in
-            encodeTestField(
+        let frame = try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
+            try renderer.encode(
+                frame: frame,
                 texture: texture,
-                commandBuffer: commandBuffer,
-                frameIndex: currentFrame
+                commandBuffer: commandBuffer
             )
         }
 
-        if frameIndex % 30 == 0 {
+        if frameIndex % 120 == 0 {
             let periodMilliseconds = Double(frame.predictedDisplayPeriod) / 1_000_000.0
             print(
                 "Frame \(frameIndex): views=\(frame.views.count) " +
@@ -136,7 +111,7 @@ if session.isRunning {
         frameIndex += 1
     }
 
-    print("Completed \(frameIndex) rendered OpenXR frames")
+    print("Completed \(frameIndex) world-rendered OpenXR frames")
 
     if session.isRunning && !session.shouldExit {
         print("Requesting clean session exit")
