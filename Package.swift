@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "SwiftXR", targets: ["SwiftXR"]),
         .executable(name: "swiftxr-probe", targets: ["SwiftXRProbe"]),
         .executable(name: "hello-swiftxr", targets: ["HelloSwiftXR"]),
+        .executable(name: "minimal-swiftxr-logo", targets: ["MinimalSwiftXRLogo"]),
     ],
     targets: [
         .systemLibrary(
@@ -37,6 +38,12 @@ let package = Package(
             name: "HelloSwiftXR",
             dependencies: ["SwiftXR"],
             path: "Examples/HelloSwiftXR",
+            linkerSettings: openXRExecutableLinkerSettings
+        ),
+        .executableTarget(
+            name: "MinimalSwiftXRLogo",
+            dependencies: ["SwiftXR"],
+            path: "Examples/MinimalSwiftXRLogo",
             linkerSettings: openXRExecutableLinkerSettings
         ),
     ]
