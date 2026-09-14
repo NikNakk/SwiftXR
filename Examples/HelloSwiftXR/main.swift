@@ -11,15 +11,37 @@ func formatPosition(_ pose: XRPose) -> String {
     return "(\(format(p.x)), \(format(p.y)), \(format(p.z)))"
 }
 
-func formatOrientation(_ pose: XRPose) -> String {
-    let q = pose.orientation
-    return "(\(format(q.x)), \(format(q.y)), \(format(q.z)), \(format(q.w)))"
+func encodeTestField(
+    texture: any MTLTexture,
+    commandBuffer: any MTLCommandBuffer,
+    frameIndex: Int
+) {
+    let pulse = 0.5 + 0.5 * sin(Double(frameIndex) * 0.04)
+    let clearColor = MTLClearColor(
+        red: 0.04 + 0.05 * pulse,
+        green: 0.12 + 0.28 * pulse,
+        blue: 0.22 + 0.45 * pulse,
+        alpha: 1.0
+    )
+
+    for eye in 0..<2 {
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = texture
+        descriptor.colorAttachments[0].slice = eye
+        descriptor.colorAttachments[0].level = 0
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.colorAttachments[0].clearColor = clearColor
+
+        if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) {
+            encoder.endEncoding()
+        }
+    }
 }
 
 print("Hello from SwiftXR")
 
 let capabilities = try XRRuntime.capabilities()
-
 let metalSupport = capabilities.supportsMetal ? "yes" : "no"
 print("Metal graphics support: \(metalSupport)")
 try capabilities.requireMetal()
@@ -45,6 +67,18 @@ let session = try system.makeSession()
 print("Metal device: \(session.device.name)")
 print("Metal command queue: created")
 print("LOCAL reference space: created")
+
+let swapchain = try session.makeStereoSwapchain()
+print(
+    "Stereo swapchain: \(swapchain.width)x\(swapchain.height), " +
+    "images=\(swapchain.imageCount), arraySize=2"
+)
+print("Swapchain Metal pixel format: \(swapchain.pixelFormat.rawValue)")
+print(
+    "Recommended views: " +
+    "left \(swapchain.viewConfiguration.leftWidth)x\(swapchain.viewConfiguration.leftHeight), " +
+    "right \(swapchain.viewConfiguration.rightWidth)x\(swapchain.viewConfiguration.rightHeight)"
+)
 print("Initial session state: \(session.state)")
 
 let startDeadline = Date().addingTimeInterval(10)
@@ -63,7 +97,7 @@ while !session.isRunning && !session.shouldExit && Date() < startDeadline {
 
 if session.isRunning {
     print("Session running: yes")
-    print("Running 360 zero-layer frames; move the headset to exercise live view poses")
+    print("Rendering 360 stereo projection frames; the headset should show a pulsing blue field")
 
     var frameIndex = 0
     while frameIndex < 360 && session.isRunning && !session.shouldExit {
@@ -76,7 +110,14 @@ if session.isRunning {
             break
         }
 
-        let frame = try session.nextFrame()
+        let currentFrame = frameIndex
+        let frame = try session.renderFrame(to: swapchain) { _, texture, commandBuffer in
+            encodeTestField(
+                texture: texture,
+                commandBuffer: commandBuffer,
+                frameIndex: currentFrame
+            )
+        }
 
         if frameIndex % 30 == 0 {
             let periodMilliseconds = Double(frame.predictedDisplayPeriod) / 1_000_000.0
@@ -87,26 +128,15 @@ if session.isRunning {
             )
 
             if frame.views.count >= 2 {
-                let left = frame.views[0]
-                let right = frame.views[1]
-                print("  left  position: \(formatPosition(left.pose))")
-                print("  right position: \(formatPosition(right.pose))")
-                print("  left orientation xyzw: \(formatOrientation(left.pose))")
+                print("  left  position: \(formatPosition(frame.views[0].pose))")
+                print("  right position: \(formatPosition(frame.views[1].pose))")
             }
-
-            let tracking = frame.trackingState
-            print(
-                "  tracking: orientation valid=\(tracking.orientationValid) " +
-                "tracked=\(tracking.orientationTracked); " +
-                "position valid=\(tracking.positionValid) " +
-                "tracked=\(tracking.positionTracked)"
-            )
         }
 
         frameIndex += 1
     }
 
-    print("Completed \(frameIndex) OpenXR frames")
+    print("Completed \(frameIndex) rendered OpenXR frames")
 
     if session.isRunning && !session.shouldExit {
         print("Requesting clean session exit")
