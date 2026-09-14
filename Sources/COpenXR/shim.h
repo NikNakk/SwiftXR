@@ -3,6 +3,7 @@
 #define XR_USE_GRAPHICS_API_METAL 1
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <openxr/openxr.h>
@@ -387,4 +388,225 @@ swiftxr_poll_session_event(
     }
 
     return XR_SUCCESS;
+}
+
+static inline XrResult
+swiftxr_choose_environment_blend_mode(
+    void *instance,
+    uint64_t system_id,
+    int32_t *out_mode)
+{
+    if (instance == NULL || out_mode == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    uint32_t count = 0;
+    XrResult result = xrEnumerateEnvironmentBlendModes(
+        (XrInstance)instance,
+        (XrSystemId)system_id,
+        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+        0,
+        &count,
+        NULL);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+    if (count == 0) {
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+
+    XrEnvironmentBlendMode *modes =
+        (XrEnvironmentBlendMode *)calloc(count, sizeof(XrEnvironmentBlendMode));
+    if (modes == NULL) {
+        return XR_ERROR_OUT_OF_MEMORY;
+    }
+
+    result = xrEnumerateEnvironmentBlendModes(
+        (XrInstance)instance,
+        (XrSystemId)system_id,
+        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+        count,
+        &count,
+        modes);
+    if (XR_FAILED(result)) {
+        free(modes);
+        return result;
+    }
+
+    XrEnvironmentBlendMode chosen = modes[0];
+    for (uint32_t i = 0; i < count; ++i) {
+        if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_OPAQUE) {
+            chosen = modes[i];
+            break;
+        }
+    }
+
+    free(modes);
+    *out_mode = (int32_t)chosen;
+    return XR_SUCCESS;
+}
+
+typedef struct SwiftXRFrameTiming {
+    int64_t predicted_display_time;
+    int64_t predicted_display_period;
+    uint32_t should_render;
+} SwiftXRFrameTiming;
+
+typedef struct SwiftXRViewData {
+    float position_x;
+    float position_y;
+    float position_z;
+    float orientation_x;
+    float orientation_y;
+    float orientation_z;
+    float orientation_w;
+    float angle_left;
+    float angle_right;
+    float angle_up;
+    float angle_down;
+} SwiftXRViewData;
+
+typedef struct SwiftXRLocatedViews {
+    uint32_t view_count;
+    uint32_t orientation_valid;
+    uint32_t position_valid;
+    uint32_t orientation_tracked;
+    uint32_t position_tracked;
+    SwiftXRViewData left;
+    SwiftXRViewData right;
+} SwiftXRLocatedViews;
+
+static inline XrResult
+swiftxr_wait_frame(void *session, SwiftXRFrameTiming *out_timing)
+{
+    if (session == NULL || out_timing == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrFrameWaitInfo wait_info = {0};
+    wait_info.type = XR_TYPE_FRAME_WAIT_INFO;
+
+    XrFrameState frame_state = {0};
+    frame_state.type = XR_TYPE_FRAME_STATE;
+
+    XrResult result = xrWaitFrame(
+        (XrSession)session,
+        &wait_info,
+        &frame_state);
+    if (XR_SUCCEEDED(result)) {
+        out_timing->predicted_display_time = (int64_t)frame_state.predictedDisplayTime;
+        out_timing->predicted_display_period = (int64_t)frame_state.predictedDisplayPeriod;
+        out_timing->should_render = frame_state.shouldRender ? 1u : 0u;
+    }
+
+    return result;
+}
+
+static inline XrResult
+swiftxr_begin_frame(void *session)
+{
+    if (session == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrFrameBeginInfo begin_info = {0};
+    begin_info.type = XR_TYPE_FRAME_BEGIN_INFO;
+    return xrBeginFrame((XrSession)session, &begin_info);
+}
+
+static inline void
+swiftxr_copy_view_data(SwiftXRViewData *destination, const XrView *source)
+{
+    destination->position_x = source->pose.position.x;
+    destination->position_y = source->pose.position.y;
+    destination->position_z = source->pose.position.z;
+    destination->orientation_x = source->pose.orientation.x;
+    destination->orientation_y = source->pose.orientation.y;
+    destination->orientation_z = source->pose.orientation.z;
+    destination->orientation_w = source->pose.orientation.w;
+    destination->angle_left = source->fov.angleLeft;
+    destination->angle_right = source->fov.angleRight;
+    destination->angle_up = source->fov.angleUp;
+    destination->angle_down = source->fov.angleDown;
+}
+
+static inline XrResult
+swiftxr_locate_stereo_views(
+    void *session,
+    void *space,
+    int64_t display_time,
+    SwiftXRLocatedViews *out_views)
+{
+    if (session == NULL || space == NULL || out_views == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    memset(out_views, 0, sizeof(*out_views));
+
+    XrViewLocateInfo locate_info = {0};
+    locate_info.type = XR_TYPE_VIEW_LOCATE_INFO;
+    locate_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate_info.displayTime = (XrTime)display_time;
+    locate_info.space = (XrSpace)space;
+
+    XrViewState view_state = {0};
+    view_state.type = XR_TYPE_VIEW_STATE;
+
+    XrView views[2] = {0};
+    views[0].type = XR_TYPE_VIEW;
+    views[1].type = XR_TYPE_VIEW;
+
+    uint32_t view_count = 0;
+    XrResult result = xrLocateViews(
+        (XrSession)session,
+        &locate_info,
+        &view_state,
+        2,
+        &view_count,
+        views);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+    if (view_count > 2) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    out_views->view_count = view_count;
+    out_views->orientation_valid =
+        (view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+    out_views->position_valid =
+        (view_state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+    out_views->orientation_tracked =
+        (view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_TRACKED_BIT) != 0;
+    out_views->position_tracked =
+        (view_state.viewStateFlags & XR_VIEW_STATE_POSITION_TRACKED_BIT) != 0;
+
+    if (view_count > 0) {
+        swiftxr_copy_view_data(&out_views->left, &views[0]);
+    }
+    if (view_count > 1) {
+        swiftxr_copy_view_data(&out_views->right, &views[1]);
+    }
+
+    return XR_SUCCESS;
+}
+
+static inline XrResult
+swiftxr_end_frame_empty(
+    void *session,
+    int64_t display_time,
+    int32_t environment_blend_mode)
+{
+    if (session == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrFrameEndInfo end_info = {0};
+    end_info.type = XR_TYPE_FRAME_END_INFO;
+    end_info.displayTime = (XrTime)display_time;
+    end_info.environmentBlendMode = (XrEnvironmentBlendMode)environment_blend_mode;
+    end_info.layerCount = 0;
+    end_info.layers = NULL;
+
+    return xrEndFrame((XrSession)session, &end_info);
 }
