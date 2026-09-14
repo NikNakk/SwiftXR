@@ -6,6 +6,7 @@ public enum XRError: Error, CustomStringConvertible, Sendable {
     case requiredExtensionMissing(String)
     case unexpectedNull(String)
     case metalDeviceBridgeFailed
+    case metalCommandQueueCreationFailed
 
     public var description: String {
         switch self {
@@ -17,6 +18,8 @@ public enum XRError: Error, CustomStringConvertible, Sendable {
             return "OpenXR unexpectedly returned a null \(value)"
         case .metalDeviceBridgeFailed:
             return "The OpenXR runtime's Metal device could not be bridged to MTLDevice"
+        case .metalCommandQueueCreationFailed:
+            return "Could not create a Metal command queue from the OpenXR runtime's MTLDevice"
         }
     }
 }
@@ -161,7 +164,7 @@ public struct XRSystemInfo: Sendable, Hashable {
 }
 
 public final class XRSystem {
-    private let instance: XRInstance
+    let instance: XRInstance
     let systemID: UInt64
 
     public let info: XRSystemInfo
@@ -212,5 +215,9 @@ public final class XRSystem {
         }
 
         return device
+    }
+
+    public func makeSession() throws -> XRSession {
+        try XRSession(system: self)
     }
 }
