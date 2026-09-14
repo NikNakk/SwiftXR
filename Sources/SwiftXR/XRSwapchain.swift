@@ -2,6 +2,7 @@ import COpenXR
 import Metal
 
 public enum XRSwapchainError: Error, CustomStringConvertible {
+    case noImages
     case textureBridgeFailed(index: Int)
     case notStereoTexture(index: Int, type: MTLTextureType, arrayLength: Int)
     case imageIndexOutOfRange(UInt32)
@@ -10,6 +11,8 @@ public enum XRSwapchainError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
+        case .noImages:
+            return "The OpenXR runtime created a swapchain with no images"
         case let .textureBridgeFailed(index):
             return "OpenXR swapchain image \(index) could not be bridged to MTLTexture"
         case let .notStereoTexture(index, type, arrayLength):
@@ -112,6 +115,11 @@ public final class XRSwapchain {
         } catch {
             _ = swiftxr_destroy_swapchain(swapchainHandle)
             throw error
+        }
+
+        guard rawImages.count > 0 else {
+            _ = swiftxr_destroy_swapchain(swapchainHandle)
+            throw XRSwapchainError.noImages
         }
 
         var textures: [any MTLTexture] = []
