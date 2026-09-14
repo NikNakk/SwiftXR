@@ -73,6 +73,36 @@ Session state: exiting
 Session exit acknowledged by runtime
 ```
 
+## Minimal example
+
+`Examples/MinimalSwiftXRLogo` removes the diagnostics and renders a small world-locked SwiftXR mark: a cyan ring with a two-colour `X`. The application-side lifecycle is intentionally compact:
+
+```swift
+let instance = try XRInstance(applicationName: "SwiftXR Logo")
+let session = try instance.system().makeSession()
+let swapchain = try session.makeStereoSwapchain()
+let logo = try LogoRenderer(device: session.device, swapchain: swapchain)
+
+while !session.isRunning && !session.shouldExit {
+    try session.pollEvents()
+}
+
+while session.isRunning && !session.shouldExit {
+    try session.pollEvents()
+    try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
+        try logo.encode(frame: frame, texture: texture, commandBuffer: commandBuffer)
+    }
+}
+```
+
+The checked-in sample runs for 900 frames and then requests a clean exit so it can be used as a deterministic smoke test.
+
+Run it with:
+
+```sh
+swift run minimal-swiftxr-logo
+```
+
 There is also a smaller loader/runtime diagnostic executable:
 
 ```sh
