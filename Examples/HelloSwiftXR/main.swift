@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import SwiftXR
 
@@ -20,10 +21,56 @@ print(
     "\(system.info.maxSwapchainImageWidth)x\(system.info.maxSwapchainImageHeight)"
 )
 print("Max compositor layers: \(system.info.maxLayerCount)")
-print("Orientation tracking: \(system.info.supportsOrientationTracking ? "yes" : "no")")
-print("Position tracking: \(system.info.supportsPositionTracking ? "yes" : "no")")
 
-let device: any MTLDevice = try system.metalDevice()
-print("Metal device: \(device.name)")
+let orientationTracking = system.info.supportsOrientationTracking ? "yes" : "no"
+let positionTracking = system.info.supportsPositionTracking ? "yes" : "no"
+print("Orientation tracking: \(orientationTracking)")
+print("Position tracking: \(positionTracking)")
 
-print("Ready to create a Metal-backed OpenXR session.")
+let session = try system.makeSession()
+print("Metal device: \(session.device.name)")
+print("Metal command queue: created")
+print("LOCAL reference space: created")
+print("Initial session state: \(session.state)")
+
+let startDeadline = Date().addingTimeInterval(10)
+var lastPrintedState = session.state
+
+while !session.isRunning && !session.shouldExit && Date() < startDeadline {
+    for state in try session.pollEvents() where state != lastPrintedState {
+        print("Session state: \(state)")
+        lastPrintedState = state
+    }
+
+    if !session.isRunning && !session.shouldExit {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+}
+
+if session.isRunning {
+    print("Session running: yes")
+    print("Requesting clean session exit")
+    try session.requestExit()
+
+    let exitDeadline = Date().addingTimeInterval(5)
+    while !session.shouldExit && Date() < exitDeadline {
+        for state in try session.pollEvents() where state != lastPrintedState {
+            print("Session state: \(state)")
+            lastPrintedState = state
+        }
+
+        if !session.shouldExit {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+    }
+
+    if session.shouldExit {
+        print("Session exit acknowledged by runtime")
+    } else {
+        print("Session exit not yet acknowledged before diagnostic timeout")
+    }
+} else if session.shouldExit {
+    print("Runtime requested exit before the session became running")
+} else {
+    print("Session did not reach READY within 10 seconds")
+}
