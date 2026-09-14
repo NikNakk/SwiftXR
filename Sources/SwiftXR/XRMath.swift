@@ -1,3 +1,4 @@
+import Darwin
 import simd
 
 public extension XRVector3 {
