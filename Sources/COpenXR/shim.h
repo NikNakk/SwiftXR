@@ -242,3 +242,149 @@ swiftxr_get_metal_device(void *instance, uint64_t system_id, void **out_device)
 
     return result;
 }
+
+static inline XrResult
+swiftxr_create_metal_session(
+    void *instance,
+    uint64_t system_id,
+    void *command_queue,
+    void **out_session)
+{
+    if (instance == NULL || command_queue == NULL || out_session == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    *out_session = NULL;
+
+    XrGraphicsBindingMetalKHR binding = {0};
+    binding.type = XR_TYPE_GRAPHICS_BINDING_METAL_KHR;
+    binding.commandQueue = command_queue;
+
+    XrSessionCreateInfo create_info = {0};
+    create_info.type = XR_TYPE_SESSION_CREATE_INFO;
+    create_info.next = &binding;
+    create_info.systemId = (XrSystemId)system_id;
+
+    XrSession session = XR_NULL_HANDLE;
+    XrResult result = xrCreateSession(
+        (XrInstance)instance,
+        &create_info,
+        &session);
+    if (XR_SUCCEEDED(result)) {
+        *out_session = (void *)session;
+    }
+
+    return result;
+}
+
+static inline XrResult
+swiftxr_destroy_session(void *session)
+{
+    if (session == NULL) {
+        return XR_SUCCESS;
+    }
+    return xrDestroySession((XrSession)session);
+}
+
+static inline XrResult
+swiftxr_begin_session(void *session)
+{
+    XrSessionBeginInfo begin_info = {0};
+    begin_info.type = XR_TYPE_SESSION_BEGIN_INFO;
+    begin_info.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    return xrBeginSession((XrSession)session, &begin_info);
+}
+
+static inline XrResult
+swiftxr_end_session(void *session)
+{
+    return xrEndSession((XrSession)session);
+}
+
+static inline XrResult
+swiftxr_request_exit_session(void *session)
+{
+    return xrRequestExitSession((XrSession)session);
+}
+
+static inline XrResult
+swiftxr_create_local_space(void *session, void **out_space)
+{
+    if (session == NULL || out_space == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    *out_space = NULL;
+
+    XrReferenceSpaceCreateInfo create_info = {0};
+    create_info.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
+    create_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    create_info.poseInReferenceSpace.orientation.w = 1.0f;
+
+    XrSpace space = XR_NULL_HANDLE;
+    XrResult result = xrCreateReferenceSpace(
+        (XrSession)session,
+        &create_info,
+        &space);
+    if (XR_SUCCEEDED(result)) {
+        *out_space = (void *)space;
+    }
+
+    return result;
+}
+
+static inline XrResult
+swiftxr_destroy_space(void *space)
+{
+    if (space == NULL) {
+        return XR_SUCCESS;
+    }
+    return xrDestroySpace((XrSpace)space);
+}
+
+static inline XrResult
+swiftxr_poll_session_event(
+    void *instance,
+    void *session,
+    uint32_t *out_had_event,
+    uint32_t *out_has_state,
+    int32_t *out_state,
+    uint32_t *out_instance_loss_pending)
+{
+    if (instance == NULL || session == NULL ||
+        out_had_event == NULL || out_has_state == NULL ||
+        out_state == NULL || out_instance_loss_pending == NULL) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    *out_had_event = 0;
+    *out_has_state = 0;
+    *out_state = (int32_t)XR_SESSION_STATE_UNKNOWN;
+    *out_instance_loss_pending = 0;
+
+    XrEventDataBuffer event = {0};
+    event.type = XR_TYPE_EVENT_DATA_BUFFER;
+
+    XrResult result = xrPollEvent((XrInstance)instance, &event);
+    if (result == XR_EVENT_UNAVAILABLE) {
+        return XR_SUCCESS;
+    }
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    *out_had_event = 1;
+
+    if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+        const XrEventDataSessionStateChanged *state_event =
+            (const XrEventDataSessionStateChanged *)&event;
+        if (state_event->session == (XrSession)session) {
+            *out_has_state = 1;
+            *out_state = (int32_t)state_event->state;
+        }
+    } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
+        *out_instance_loss_pending = 1;
+    }
+
+    return XR_SUCCESS;
+}
