@@ -70,6 +70,24 @@ public final class XRPanelInteraction {
         internalHandler = handler
     }
 
+    /// Update pointer state for a native host-input path without redispatching a
+    /// semantic panel event back into the hosted UI. This is used by the macOS
+    /// native mouse bridge, where AppKit receives a transformed `NSEvent`
+    /// directly and must not also receive SwiftXR's synthetic semantic event.
+    @discardableResult
+    func setNativePointerPosition(_ position: SIMD2<Float>) -> SIMD2<Float> {
+        let clamped = Self.clamped(position)
+        pointerPosition = clamped
+        return clamped
+    }
+
+    /// Move native pointer state without invoking the semantic UI bridge.
+    @discardableResult
+    func moveNativePointer(by delta: SIMD2<Float>) -> SIMD2<Float> {
+        let origin = pointerPosition ?? SIMD2<Float>(0.5, 0.5)
+        return setNativePointerPosition(origin + delta)
+    }
+
     public func send(_ event: XRPanelInteractionEvent) {
         switch event {
         case let .pointerMoved(position):
