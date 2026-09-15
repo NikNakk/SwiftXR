@@ -122,8 +122,7 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Plain Swift executables do not get LaunchServices activation for free.
         // Activate explicitly, then repeat on the next main-queue turn after
-        // AppKit has completed finishLaunching. This replaces the temporary
-        // .app/NSPrincipalClass bootstrap used by the previous experiment.
+        // AppKit has completed finishLaunching.
         NSApplication.shared.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -214,10 +213,10 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
             if session.isRunning {
                 try startPointerCaptureIfReady()
 
-                // GAV-style physical input sampling. This keeps running even
-                // while an AppKit control such as Slider is inside its nested
-                // event-tracking loop, because frameStep is scheduled in that
-                // run-loop mode below.
+                // GAV-style physical input sampling. XRMacApplication filters
+                // the competing physical capture-window mouse events before a
+                // native SwiftUI/AppKit control can consume them, leaving only
+                // the synthetic host-window stream produced from this polling.
                 pointerCapture.poll()
 
                 let controller = GCController.current ?? GCController.controllers().first
@@ -303,7 +302,11 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
 struct SwiftUIPanelExample {
     @MainActor
     static func main() {
-        let application = NSApplication.shared
+        // Apple explicitly supports constructing a custom NSApplication subclass
+        // by sending `shared` to that subclass first. This gives SwiftXR its
+        // nextEvent filtering hook without NSPrincipalClass, NSApplicationMain,
+        // LaunchServices, or a temporary .app bundle.
+        let application = XRMacApplication.shared
         application.setActivationPolicy(.regular)
 
         let appDelegate = SwiftUIPanelAppDelegate()
