@@ -32,8 +32,11 @@ For ordinary audio, `AVPlayer` is routed directly to the PS VR2 CoreAudio device
 - SBS VR180 equidistant-fisheye projection;
 - mono YouTube/FFmpeg 3×2 EAC360 projection, including FFmpeg-compatible face rotations and edge padding;
 - immersive scene anchored to initial gaze, with recenter and scene tilt;
+- live switching between Flat / VR180 / Fisheye / EAC360;
 - explicit PS VR2 audio-device routing for ordinary stereo audio;
 - optional head-tracked four-channel AmbiX audio with host-clock video/audio synchronization;
+- native SwiftUI in-headset transport panel with play/pause, seeking, volume, recenter and projection controls;
+- GAV-style hidden/disassociated physical mouse driving the SwiftUI panel through SwiftXR's off-screen AppKit input bridge;
 - game-controller play/pause, seek, volume, recenter and scene tilt;
 - no extra per-frame CPU wait for Metal completion.
 
@@ -70,6 +73,21 @@ The YouTube cache is shared with the mature GAV POC at:
 ```text
 ~/Library/Caches/GAVPSVR2/YouTube
 ```
+
+## In-headset controls
+
+The native SwiftUI transport panel is initially visible, auto-hides after four seconds of inactivity, and reappears when the physical mouse/trackpad moves. The real macOS cursor is hidden and disassociated while SwiftXR is capturing it, so desktop apps do not receive the panel clicks.
+
+The panel provides:
+
+- play / pause;
+- ±15 second seek buttons;
+- a scrubber with absolute seek on release;
+- volume slider;
+- recenter;
+- live Flat / VR180 / Fisheye / EAC360 selection.
+
+`Escape` releases the mouse and requests OpenXR session exit.
 
 ## Projection selection
 
@@ -121,10 +139,10 @@ With a GameController-compatible pad connected:
 - D-pad left / right: seek −15 / +15 seconds;
 - D-pad up / down: volume ±5%;
 - Triangle / Y: recenter immersive scene;
+- Menu: show/hide the transport panel;
+- Circle / B: hide the transport panel;
 - right stick: yaw/pitch the immersive scene.
 
 ## Current validation status
 
-The local flat decode → Metal → SwiftXR → PSVR2 path has been validated on-device. The immersive projection, YouTube, explicit audio routing, controller and AmbiX paths are ports of the corresponding proven GAV algorithms but still require device-level validation in this Swift implementation.
-
-A SwiftUI in-headset transport/browser panel is intentionally the next layer rather than a prerequisite for the playback core; SwiftXR's separate off-screen SwiftUI interaction proof of concept already provides the native-control input mechanism needed for that UI.
+The local flat decode → Metal → SwiftXR → PSVR2 path has been validated on-device. The immersive projection, YouTube, explicit audio routing, controller, AmbiX and integrated transport-panel paths compile together in the SwiftXR implementation and are ports of the corresponding proven GAV/SwiftUI POC algorithms, but they still require device-level validation as an integrated player.
