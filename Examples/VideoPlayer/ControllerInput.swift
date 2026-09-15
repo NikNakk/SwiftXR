@@ -3,8 +3,11 @@ import Foundation
 
 struct VideoControllerSnapshot {
     var togglePlay = false
+    var select = false
     var seekSteps = 0
     var volumeSteps = 0
+    var navX = 0
+    var navY = 0
     var recenter = false
     var menu = false
     var back = false
@@ -31,7 +34,7 @@ final class VideoControllerInput {
     init() {
         GCController.shouldMonitorBackgroundEvents = true
         print("[controller] background event monitoring enabled")
-        print("[controller] A/Cross play-pause; L1/R1 seek ±15s; D-pad up/down volume; Y/Triangle recenter; right stick scene tilt")
+        print("[controller] A/Cross select/play-pause; L1/R1 seek ±15s; D-pad browser navigation; Y/Triangle recenter; right stick scene tilt/YouTube scroll")
     }
 
     func poll() -> VideoControllerSnapshot {
@@ -52,7 +55,9 @@ final class VideoControllerInput {
         }
 
         var result = VideoControllerSnapshot()
-        result.togglePlay = rising(pad.buttonA.isPressed, previous: &previousA)
+        let a = rising(pad.buttonA.isPressed, previous: &previousA)
+        result.togglePlay = a
+        result.select = a
         result.back = rising(pad.buttonB.isPressed, previous: &previousB)
         result.recenter = rising(pad.buttonY.isPressed, previous: &previousY)
         result.menu = rising(pad.buttonMenu.isPressed, previous: &previousMenu)
@@ -63,16 +68,21 @@ final class VideoControllerInput {
         if rising(pad.rightShoulder.isPressed, previous: &previousR1) {
             result.seekSteps += 1
         }
+
         if rising(pad.dpad.left.isPressed, previous: &previousDpadLeft) {
+            result.navX -= 1
             result.seekSteps -= 1
         }
         if rising(pad.dpad.right.isPressed, previous: &previousDpadRight) {
+            result.navX += 1
             result.seekSteps += 1
         }
         if rising(pad.dpad.up.isPressed, previous: &previousDpadUp) {
+            result.navY -= 1
             result.volumeSteps += 1
         }
         if rising(pad.dpad.down.isPressed, previous: &previousDpadDown) {
+            result.navY += 1
             result.volumeSteps -= 1
         }
 
