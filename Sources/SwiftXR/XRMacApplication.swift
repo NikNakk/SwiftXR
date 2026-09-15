@@ -1,6 +1,6 @@
 import AppKit
 
-/// AppKit application subclass used by SwiftXR macOS applications that want
+/// AppKit application base class used by SwiftXR macOS applications that want
 /// native mouse/trackpad interaction with off-screen SwiftUI panels.
 ///
 /// The important interception point is `nextEvent(...)`, rather than an
@@ -9,14 +9,19 @@ import AppKit
 /// `nextEvent`, bypassing local monitors. Transforming the event here lets those
 /// controls see an ordinary mouseDown -> dragged -> mouseUp stream addressed to
 /// the off-screen hosting window.
+///
+/// Swift Package clients should normally declare a trivial application-local
+/// subclass and use that subclass as `NSPrincipalClass`. Keeping the principal
+/// class in the app executable makes Objective-C runtime discovery deterministic
+/// during AppKit's very early application-singleton creation.
 @MainActor
 @objc(XRMacApplication)
-public final class XRMacApplication: NSApplication {
+open class XRMacApplication: NSApplication {
     typealias EventTransformer = (NSEvent) -> NSEvent?
 
     var swiftXREventTransformer: EventTransformer?
 
-    public override func nextEvent(
+    open override func nextEvent(
         matching mask: NSEvent.EventTypeMask,
         until expiration: Date?,
         inMode mode: RunLoop.Mode,
