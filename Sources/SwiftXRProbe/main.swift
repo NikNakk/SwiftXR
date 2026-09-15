@@ -6,7 +6,8 @@ do {
 
     print("OpenXR runtime detected")
     print("Extensions: \(capabilities.extensions.count)")
-    print("XR_KHR_metal_enable: \(capabilities.supportsMetal ? \"yes\" : \"no\")")
+    let metalSupport = capabilities.supportsMetal ? "yes" : "no"
+    print("XR_KHR_metal_enable: \(metalSupport)")
 
     try capabilities.requireMetal()
     print("SwiftXR prerequisite check passed")
