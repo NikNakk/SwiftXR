@@ -4,6 +4,14 @@ import GameController
 import SwiftUI
 import SwiftXR
 
+/// Keep the AppKit principal class in the application executable itself. SwiftPM
+/// normally links SwiftXR as a library target, and AppKit resolves
+/// NSPrincipalClass before library-backed Swift classes are a reliable place to
+/// discover the application singleton class.
+@MainActor
+@objc(SwiftUIPanelApplication)
+private final class SwiftUIPanelApplication: XRMacApplication {}
+
 @MainActor
 private final class PanelModel: ObservableObject {
     @Published var playing = false
@@ -383,7 +391,7 @@ struct SwiftUIPanelExample {
             "CFBundleVersion": "1",
             "LSMinimumSystemVersion": "14.0",
             "NSHighResolutionCapable": true,
-            "NSPrincipalClass": "XRMacApplication",
+            "NSPrincipalClass": "SwiftUIPanelApplication",
             "LSEnvironment": launchEnvironment,
         ]
 
