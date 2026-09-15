@@ -62,18 +62,16 @@ private struct FlatVideoUniforms {
 
 private struct ImmersiveVideoUniforms {
     var viewOrientation: SIMD4<Float>
-    // tan(left), tan(right), tan(down), tan(up)
     var fovTangents: SIMD4<Float>
     var anchorRight: SIMD4<Float>
     var anchorUp: SIMD4<Float>
     var anchorForward: SIMD4<Float>
-    // eye index, projection mode, texture width, texture height
     var parameters: SIMD4<Float>
 }
 
 final class VideoRenderer {
     let geometry: VideoSurfaceGeometry
-    let projectionMode: VideoProjectionMode
+    private(set) var projectionMode: VideoProjectionMode
 
     private let flatPipelineState: any MTLRenderPipelineState
     private let immersivePipelineState: any MTLRenderPipelineState
@@ -157,6 +155,13 @@ final class VideoRenderer {
         self.vertexBuffer = buffer
     }
 
+    func setProjectionMode(_ mode: VideoProjectionMode) {
+        guard mode != projectionMode else { return }
+        projectionMode = mode
+        anchor = nil
+        print("Projection: \(mode)")
+    }
+
     func recenter() {
         anchor = nil
     }
@@ -233,7 +238,7 @@ final class VideoRenderer {
                 encoder.setFragmentSamplerState(samplerState, index: 0)
 
                 if projectionMode == .flat {
-                    try encodeFlat(encoder: encoder, frame: frame, eye: eye)
+                    encodeFlat(encoder: encoder, frame: frame, eye: eye)
                 } else if let anchor {
                     encodeImmersive(
                         encoder: encoder,
@@ -253,7 +258,7 @@ final class VideoRenderer {
         encoder: any MTLRenderCommandEncoder,
         frame: XRFrame,
         eye: Int
-    ) throws {
+    ) {
         encoder.setRenderPipelineState(flatPipelineState)
         var uniforms = FlatVideoUniforms(
             viewProjection: frame.views[eye].viewProjectionMatrix(nearZ: 0.05, farZ: 50)
@@ -378,14 +383,8 @@ final class VideoRenderer {
         return v + 2.0 * cross(qv, cross(qv, v) + q.w * v);
     }
 
-    // YouTube/FFmpeg Equi-Angular Cubemap, 3x2 layout.
-    // Face packing matches FFmpeg v360 prepare_eac_in():
-    //   top:    LEFT | FRONT | RIGHT
-    //   bottom: DOWN | BACK  | UP
     static float2 projectEAC(float3 w, uint textureWidth, uint textureHeight)
     {
-        // SwiftXR/GAV convention is x-right, y-up, -z-forward. Convert to
-        // FFmpeg's x-right, y-down, +z-forward convention first.
         float3 p = float3(w.x, -w.y, -w.z);
         float ax = fabs(p.x), ay = fabs(p.y), az = fabs(p.z);
 
@@ -434,7 +433,6 @@ final class VideoRenderer {
         uf = (2.0 / PI) * atan(uf) + 0.5;
         vf = (2.0 / PI) * atan(vf) + 0.5;
 
-        // Match FFmpeg's two-pixel EAC face padding to avoid seams.
         const float uPad = 2.0 / float(max(textureWidth, 1u));
         const float vPad = 2.0 / float(max(textureHeight, 1u));
         return float2(
@@ -471,7 +469,6 @@ final class VideoRenderer {
             return video.sample(videoSampler, uv);
         }
 
-        // Both supported VR180 layouts only contain the forward hemisphere.
         if (localForward <= 0.0) {
             return float4(0.0, 0.0, 0.0, 1.0);
         }
@@ -501,7 +498,6 @@ final class VideoRenderer {
             return float4(0.0, 0.0, 0.0, 1.0);
         }
 
-        // SBS: the left OpenXR eye samples the left half and the right eye the right half.
         const float2 uv = float2((eyeUV.x + float(eye)) * 0.5, eyeUV.y);
         return video.sample(videoSampler, uv);
     }
