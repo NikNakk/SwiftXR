@@ -23,19 +23,21 @@ public enum XRSwiftUIPanelError: Error, CustomStringConvertible {
 /// A hosted SwiftUI surface rendered into a shader-readable Metal texture.
 ///
 /// The SwiftUI hierarchy lives inside an off-screen `NSHostingView` with a real
-/// AppKit responder chain. Device-neutral panel interaction events are translated
-/// into AppKit mouse/key events so standard SwiftUI controls can respond.
+/// AppKit responder chain. Device-neutral interaction remains available through
+/// `interaction`, while `XRMacPointerCapture(panel:)` can route the macOS mouse
+/// through AppKit's native event/tracking machinery.
 @MainActor
 public final class XRSwiftUIPanel<Content: View> {
     private let device: any MTLDevice
     private let textureLoader: MTKTextureLoader
     private let host: XRSwiftUIHost<Content>
+    private var nativeInputNeedsRefresh = false
 
     public let pointSize: CGSize
     public let scale: CGFloat
 
-    /// Semantic panel-input endpoint. Applications map GameController, AppKit,
-    /// engine input, or future OpenXR/Sense input into this endpoint.
+    /// Semantic panel-input endpoint for gamepads, ray pointers, future Sense
+    /// controller input, and other non-native pointer sources.
     public let interaction: XRPanelInteraction
 
     public private(set) var texture: any MTLTexture
@@ -80,10 +82,6 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            // Toggle/Slider updates and accessibility Button presses are all
-            // dispatched synchronously by XRSwiftUIHost. Refresh immediately,
-            // then once more on the next main-loop turn for deferred SwiftUI
-            // state propagation.
             try? self.refresh()
 
             DispatchQueue.main.async { [weak self] in
@@ -95,6 +93,15 @@ public final class XRSwiftUIPanel<Content: View> {
     /// Forward a device-neutral interaction intent to this panel.
     public func send(_ event: XRPanelInteractionEvent) {
         interaction.send(event)
+    }
+
+    /// Refresh only when native AppKit input has changed the hosted surface.
+    /// Applications using `XRMacPointerCapture(panel:)` should call this once per
+    /// XR frame before drawing the panel. In the common case it is a cheap no-op.
+    public func refreshIfNeeded() throws {
+        guard nativeInputNeedsRefresh else { return }
+        nativeInputNeedsRefresh = false
+        try refresh()
     }
 
     /// Rasterize the hosted SwiftUI hierarchy again and update the existing
@@ -150,6 +157,21 @@ public final class XRSwiftUIPanel<Content: View> {
         }
     }
 
+    func prepareForNativeMacPointerCapture() {
+        host.prepareForNativeMouseCapture()
+    }
+
+    func transformNativeMacMouseEvent(
+        _ event: NSEvent,
+        pointerPosition: SIMD2<Float>
+    ) -> NSEvent? {
+        nativeInputNeedsRefresh = true
+        return host.transformNativeMouseEvent(
+            event,
+            pointerPosition: pointerPosition
+        )
+    }
+
     private static func makeTexture(
         loader: MTKTextureLoader,
         image: CGImage
@@ -167,5 +189,30 @@ public final class XRSwiftUIPanel<Content: View> {
         )
         texture.label = "SwiftXR hosted SwiftUI panel"
         return texture
+    }
+}
+
+public extension XRMacPointerCapture {
+    /// Capture the macOS mouse/trackpad for a hosted SwiftUI panel while keeping
+    /// AppKit's native control tracking semantics. Use this initializer for
+    /// Buttons, Sliders, hover effects, drag gestures, and similar controls.
+    convenience init<Content: View>(
+        panel: XRSwiftUIPanel<Content>,
+        movementScale: SIMD2<Float> = SIMD2(700, 500)
+    ) {
+        self.init(
+            interaction: panel.interaction,
+            movementScale: movementScale,
+            nativeEventTransformer: { [weak panel] event, pointerPosition in
+                guard let panel else { return event }
+                return panel.transformNativeMacMouseEvent(
+                    event,
+                    pointerPosition: pointerPosition
+                )
+            },
+            nativeCapturePreparation: { [weak panel] in
+                panel?.prepareForNativeMacPointerCapture()
+            }
+        )
     }
 }
