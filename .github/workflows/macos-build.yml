@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - macos-virtual-desktop
+      - swiftxr-video-player-poc
   pull_request:
   workflow_dispatch:
 
@@ -55,3 +56,6 @@ jobs:
 
       - name: Build virtual desktop product (release)
         run: swift build -c release --product swiftxr-desktop -v
+
+      - name: Build video player product (release)
+        run: swift build -c release --product swiftxr-video -v
