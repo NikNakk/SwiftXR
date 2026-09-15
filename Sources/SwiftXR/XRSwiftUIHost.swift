@@ -15,7 +15,7 @@ final class XRSwiftUIHost<Content: View> {
     private let window: XRSwiftUIHostingWindow
     private let hostingView: NSHostingView<Content>
     private var pressedButtons: Set<XRPanelPointerButton> = []
-    private var pendingAccessibilityButton: (any NSAccessibilityProtocol)?
+    private var pendingAccessibilityButton = false
 
     init(
         pointSize: CGSize,
@@ -104,7 +104,7 @@ final class XRSwiftUIHost<Content: View> {
             sendPointerMove(to: pointerPosition)
 
         case .pointerExited:
-            pendingAccessibilityButton = nil
+            pendingAccessibilityButton = false
 
         case let .pointerDown(button):
             guard let pointerPosition else { return }
@@ -133,10 +133,9 @@ final class XRSwiftUIHost<Content: View> {
     private func sendPointerMove(to normalizedPosition: SIMD2<Float>) {
         prepareForInteraction()
 
-        // A SwiftUI Button is activated through the accessibility fallback below.
-        // While it is held, do not feed an unmatched drag stream into the hosting
-        // view: merely update XRPanelInteraction's virtual pointer position.
-        if pendingAccessibilityButton != nil && pressedButtons.contains(.primary) {
+        // Buttons use the accessibility fallback below. Avoid sending an
+        // unmatched drag stream into NSHostingView while such a press is held.
+        if pendingAccessibilityButton && pressedButtons.contains(.primary) {
             return
         }
 
@@ -165,8 +164,8 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        // This direct host-window path is known to preserve normal Toggle and
-        // Slider interaction in the off-screen SwiftUI hierarchy.
+        // This direct host-window path is known to preserve Toggle and Slider
+        // interaction in the off-screen SwiftUI hierarchy.
         window.sendEvent(event)
     }
 
@@ -181,24 +180,22 @@ final class XRSwiftUIHost<Content: View> {
             if down {
                 // Standard SwiftUI Button actions have not reliably completed via
                 // synthetic AppKit mouse-up events, although Toggle and Slider do.
-                // Use SwiftUI's accessibility element for the semantic Button
-                // press only when hit-testing identifies an actual button.
-                if let accessibilityButton = accessibilityButton(
-                    at: normalizedPosition
-                ) {
-                    pendingAccessibilityButton = accessibilityButton
+                // Use the accessibility tree only when the press actually begins
+                // over a semantic Button.
+                if accessibilityButton(at: normalizedPosition) != nil {
+                    pendingAccessibilityButton = true
                     return
                 }
-            } else if let pendingAccessibilityButton {
-                defer { self.pendingAccessibilityButton = nil }
+            } else if pendingAccessibilityButton {
+                pendingAccessibilityButton = false
 
-                // Match normal button semantics: activate only if release is still
-                // over the same accessible button that was pressed.
+                // Match normal click semantics sufficiently for XR: a press that
+                // began on a Button activates only when release is also on a
+                // Button. Do not depend on accessibility wrapper identity because
+                // SwiftUI may return a fresh wrapper on each hit test.
                 if let releaseButton = accessibilityButton(
                     at: normalizedPosition
-                ),
-                   (releaseButton as AnyObject) ===
-                        (pendingAccessibilityButton as AnyObject) {
+                ) {
                     _ = releaseButton.accessibilityPerformPress()
                 }
                 return
