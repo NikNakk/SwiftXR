@@ -7,9 +7,12 @@ import SwiftXR
 
 @MainActor
 private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
-    private let rawInput: String
+    private let initialInput: String?
 
     private var setupTask: Task<Void, Never>?
+    private var mediaOpenTask: Task<Void, Never>?
+    private var mediaOpenGeneration = 0
+
     private var instance: XRInstance?
     private var session: XRSession?
     private var swapchain: XRSwapchain?
@@ -19,13 +22,16 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     private var ambisonic: AmbisonicAudio?
 
     private var controlsModel: VideoControlsModel?
-    private var controlsPanel: XRSwiftUIPanel<VideoControlsView>?
-    private var controlsRenderer: VideoControlPanelRenderer?
+    private var libraryModel: VideoLibraryModel?
+    private var panel: XRSwiftUIPanel<VideoPlayerRootView>?
+    private var panelRenderer: VideoControlPanelRenderer?
     private var pointerCapture: XRMacPointerCapture?
+    private var youtubeBrowser: YouTubeBrowserController?
 
     private var panelVisible = true
     private var lastPanelActivity = Date()
     private let panelAutoHideSeconds: TimeInterval = 4
+    private var lastYouTubeControllerUpdate = Date()
 
     private var playbackStarted = false
     private var exitRequested = false
@@ -35,8 +41,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     private var lastSessionState: XRSessionState?
     private var lastControlsUpdate = Date.distantPast
 
-    init(rawInput: String) {
-        self.rawInput = rawInput
+    init(initialInput: String?) {
+        self.initialInput = initialInput
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -48,7 +54,14 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         setupTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await self.setUpPlayer()
+                try self.setUpXRAndUI()
+                if let initialInput {
+                    self.beginOpenMedia(initialInput)
+                } else {
+                    self.libraryModel?.openInitialDirectory()
+                    self.panel?.invalidate()
+                    print("No media argument: opening in-headset file browser")
+                }
                 self.scheduleFrameStep()
             } catch {
                 self.fail(error)
@@ -66,6 +79,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         setupTask?.cancel()
+        mediaOpenTask?.cancel()
+        youtubeBrowser?.close()
         pointerCapture?.stop()
         source?.pause()
         ambisonic?.pause()
@@ -74,17 +89,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func setUpPlayer() async throws {
+    private func setUpXRAndUI() throws {
         print("SwiftXR video player")
-        print("Input: \(rawInput)")
-
-        let resolved = try MediaInputResolver.resolve(rawInput)
-        print("Resolved media: \(resolved.url.path)")
-        let projectionMode = VideoProjectionMode.resolve(
-            inputPath: resolved.url.path,
-            youtubeEACHint: resolved.youtubeEACHint
-        )
-        print("Projection: \(projectionMode)")
 
         let capabilities = try XRRuntime.capabilities()
         try capabilities.requireMetal()
@@ -99,67 +105,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         print("Runtime Metal device: \(session.device.name)")
         print("XR swapchain: \(swapchain.width)x\(swapchain.height), arraySize=2")
 
-        print("Opening video with AVFoundation…")
-        let source = try await VideoSource.open(url: resolved.url, device: session.device)
-        let aspect = source.displaySize.width / max(source.displaySize.height, 1)
-        print(
-            String(
-                format: "Video display size: %.0fx%.0f (aspect %.3f)",
-                source.displaySize.width,
-                source.displaySize.height,
-                aspect
-            )
-        )
-        if let duration = source.durationSeconds {
-            print(String(format: "Duration: %.2f s", duration))
-        }
-
-        print("Waiting for AVPlayerItem readiness…")
-        try await source.waitUntilReady()
-        print("AVPlayerItem status: \(source.itemStatusDescription)")
-
-        _ = VideoAudioRouting.routeToPSVR2(source.player)
-
-        var ambisonic: AmbisonicAudio?
-        if let sidecar = resolved.ambisonicURL {
-            do {
-                let spatial = try AmbisonicAudio(sidecarURL: sidecar)
-                spatial.setVolume(source.volume)
-                source.player.isMuted = true
-                source.player.automaticallyWaitsToMinimizeStalling = false
-                ambisonic = spatial
-            } catch {
-                fputs("[audio] AmbiX unavailable (\(error)); using stereo AVPlayer audio\n", stderr)
-                source.player.isMuted = false
-                source.player.automaticallyWaitsToMinimizeStalling = true
-            }
-        }
-
-        let renderer = try VideoRenderer(
-            device: session.device,
-            swapchain: swapchain,
-            displaySize: source.displaySize,
-            projectionMode: projectionMode
-        )
-        if projectionMode == .flat {
-            print(
-                String(
-                    format: "Virtual screen: %.2f m × %.2f m at %.1f m in LOCAL space",
-                    renderer.geometry.widthMeters,
-                    renderer.geometry.heightMeters,
-                    -renderer.geometry.center.z
-                )
-            )
-        } else {
-            print("Immersive scene will anchor to initial headset gaze")
-        }
-
-        let controller = VideoControllerInput()
-        let model = VideoControlsModel(
-            title: resolved.url.deletingPathExtension().lastPathComponent,
-            projectionMode: projectionMode
-        )
-        model.commandHandler = { [weak self] command in
+        let controls = VideoControlsModel(title: "SwiftXR", projectionMode: .flat)
+        controls.commandHandler = { [weak self] command in
             guard let self else { return }
             do {
                 try self.handle(command)
@@ -168,48 +115,182 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        let library = VideoLibraryModel()
+        library.openMedia = { [weak self] input in
+            self?.beginOpenMedia(input)
+        }
+        library.openYouTube = { [weak self] in
+            self?.enterYouTubeBrowser()
+        }
+
+        let youtube = YouTubeBrowserController()
+        youtube.onSnapshot = { [weak self] image in
+            guard let self else { return }
+            self.libraryModel?.setYouTubeSnapshot(image)
+            self.panel?.invalidate()
+        }
+        youtube.onStatus = { [weak self] status in
+            guard let self else { return }
+            self.libraryModel?.setYouTubeStatus(status)
+            self.panel?.invalidate()
+        }
+        youtube.onLaunchURL = { [weak self] url in
+            self?.beginOpenMedia(url)
+        }
+
         let panel = try XRSwiftUIPanel(
             device: session.device,
-            pointSize: CGSize(width: 662, height: 257),
-            scale: 2,
-            interactionHandler: { [weak self] _ in
-                self?.notePanelActivity()
+            pointSize: CGSize(width: 1024, height: 512),
+            scale: 1,
+            interactionHandler: { [weak self] event in
+                self?.handlePanelInteraction(event)
             }
         ) {
-            VideoControlsView(model: model)
+            VideoPlayerRootView(library: library, controls: controls)
         }
-        let controlsRenderer = try VideoControlPanelRenderer(
+        let panelRenderer = try VideoControlPanelRenderer(
             device: session.device,
             swapchain: swapchain,
             panelTexture: panel.texture
         )
         let pointerCapture = XRMacPointerCapture(panel: panel)
+        let controller = VideoControllerInput()
 
         self.instance = instance
         self.session = session
         self.swapchain = swapchain
-        self.source = source
-        self.renderer = renderer
-        self.controller = controller
-        self.ambisonic = ambisonic
-        self.controlsModel = model
-        self.controlsPanel = panel
-        self.controlsRenderer = controlsRenderer
+        self.controlsModel = controls
+        self.libraryModel = library
+        self.panel = panel
+        self.panelRenderer = panelRenderer
         self.pointerCapture = pointerCapture
+        self.youtubeBrowser = youtube
+        self.controller = controller
         self.lastSessionState = session.state
 
-        _ = model.update(
-            isPlaying: false,
-            currentTime: source.currentTimeSeconds,
-            duration: source.durationSeconds ?? 0,
-            volume: source.volume,
-            projectionMode: renderer.projectionMode,
-            spatialAudioEnabled: ambisonic != nil
-        )
-        panel.invalidate()
-
         print("Projection override: SWIFTXR_VIDEO_PROJECTION=flat|vr180|fisheye|eac360")
-        print("Move the mouse to show controls; Escape exits")
+        print("No argument opens Files; explicit file/YouTube arguments still open directly")
+        print("Move the mouse to interact; Escape exits")
+    }
+
+    private func beginOpenMedia(_ input: String) {
+        guard let session else { return }
+
+        mediaOpenGeneration += 1
+        let generation = mediaOpenGeneration
+        mediaOpenTask?.cancel()
+
+        libraryModel?.showLoading(input.hasPrefix("http") ? "Resolving YouTube video…" : "Opening video…")
+        panelVisible = true
+        panel?.invalidate()
+        youtubeBrowser?.close()
+
+        source?.pause()
+        ambisonic?.pause()
+        playbackStarted = false
+
+        mediaOpenTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let resolved = try await Task.detached(priority: .userInitiated) {
+                    try MediaInputResolver.resolve(input)
+                }.value
+                try Task.checkCancellation()
+                guard generation == self.mediaOpenGeneration else { return }
+
+                print("Resolved media: \(resolved.url.path)")
+                let projectionMode = VideoProjectionMode.resolve(
+                    inputPath: resolved.url.path,
+                    youtubeEACHint: resolved.youtubeEACHint
+                )
+                print("Projection: \(projectionMode)")
+
+                print("Opening video with AVFoundation…")
+                let newSource = try await VideoSource.open(
+                    url: resolved.url,
+                    device: session.device
+                )
+                try await newSource.waitUntilReady()
+                try Task.checkCancellation()
+                guard generation == self.mediaOpenGeneration else { return }
+
+                let aspect = newSource.displaySize.width / max(newSource.displaySize.height, 1)
+                print(
+                    String(
+                        format: "Video display size: %.0fx%.0f (aspect %.3f)",
+                        newSource.displaySize.width,
+                        newSource.displaySize.height,
+                        aspect
+                    )
+                )
+                if let duration = newSource.durationSeconds {
+                    print(String(format: "Duration: %.2f s", duration))
+                }
+
+                _ = VideoAudioRouting.routeToPSVR2(newSource.player)
+
+                var newAmbisonic: AmbisonicAudio?
+                if let sidecar = resolved.ambisonicURL {
+                    do {
+                        let spatial = try AmbisonicAudio(sidecarURL: sidecar)
+                        spatial.setVolume(newSource.volume)
+                        newSource.player.isMuted = true
+                        newSource.player.automaticallyWaitsToMinimizeStalling = false
+                        newAmbisonic = spatial
+                    } catch {
+                        fputs("[audio] AmbiX unavailable (\(error)); using stereo AVPlayer audio\n", stderr)
+                        newSource.player.isMuted = false
+                        newSource.player.automaticallyWaitsToMinimizeStalling = true
+                    }
+                }
+
+                let newRenderer = try VideoRenderer(
+                    device: session.device,
+                    swapchain: self.swapchain!,
+                    displaySize: newSource.displaySize,
+                    projectionMode: projectionMode
+                )
+
+                self.source?.pause()
+                self.ambisonic?.pause()
+                self.source = newSource
+                self.ambisonic = newAmbisonic
+                self.renderer = newRenderer
+                self.playbackStarted = false
+                self.decodedFrameCount = 0
+                self.lastDecodedFrameTime = nil
+
+                self.controlsModel?.title = resolved.url.deletingPathExtension().lastPathComponent
+                _ = self.controlsModel?.update(
+                    isPlaying: false,
+                    currentTime: 0,
+                    duration: newSource.durationSeconds ?? 0,
+                    volume: newSource.volume,
+                    projectionMode: projectionMode,
+                    spatialAudioEnabled: newAmbisonic != nil
+                )
+
+                self.libraryModel?.showControls()
+                self.panelVisible = true
+                self.lastPanelActivity = Date()
+                self.panel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
+                self.panel?.invalidate()
+
+                if session.isRunning {
+                    try self.startPlayback()
+                    self.playbackStarted = true
+                    print("Media opened; playback started")
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == self.mediaOpenGeneration else { return }
+                fputs("swiftxr-video: could not open media: \(error)\n", stderr)
+                self.libraryModel?.showError(String(describing: error))
+                self.panelVisible = true
+                self.panel?.invalidate()
+            }
+        }
     }
 
     @objc
@@ -217,11 +298,10 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         guard
             let session,
             let swapchain,
-            let source,
-            let renderer,
             let controller,
-            let controlsPanel,
-            let controlsRenderer,
+            let libraryModel,
+            let panel,
+            let panelRenderer,
             let pointerCapture
         else {
             return
@@ -247,7 +327,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
             guard session.isRunning else {
                 if playbackStarted {
-                    source.pause()
+                    source?.pause()
                     ambisonic?.pause()
                     playbackStarted = false
                 }
@@ -256,13 +336,14 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             }
 
             try startPointerCaptureIfReady()
-            if !playbackStarted {
+
+            if source != nil && !playbackStarted && libraryModel.mode != .loading {
                 try startPlayback()
                 playbackStarted = true
                 print("OpenXR session running; playback started")
             }
 
-            if let failure = source.failureDescription {
+            if let failure = source?.failureDescription {
                 throw NSError(
                     domain: "SwiftXR.VideoPlayer",
                     code: 2,
@@ -272,34 +353,45 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
             pointerCapture.poll()
             try applyController(controller.poll())
+
+            if libraryModel.mode == .youtube {
+                youtubeBrowser?.tick()
+            }
+
             updatePanelVisibility()
             updateControlsModelIfNeeded()
-            try controlsPanel.refreshIfNeeded()
+            try panel.refreshIfNeeded()
 
-            let videoFrame = try source.latestFrame()
+            let videoFrame = try source?.latestFrame()
             if let videoFrame, videoFrame.itemTime != lastDecodedFrameTime {
                 decodedFrameCount += 1
                 lastDecodedFrameTime = videoFrame.itemTime
             }
 
-            let showControls = panelVisible
+            let currentRenderer = renderer
+            let showPanel = libraryModel.mode != .controls || panelVisible
             let frame = try session.renderFrame(to: swapchain) {
                 xrFrame,
                 texture,
                 commandBuffer in
-                try renderer.encode(
-                    frame: xrFrame,
-                    swapchainTexture: texture,
-                    videoTexture: videoFrame?.texture,
-                    commandBuffer: commandBuffer
-                )
-                if showControls {
-                    try controlsRenderer.encode(
+
+                if let currentRenderer {
+                    try currentRenderer.encode(
                         frame: xrFrame,
                         swapchainTexture: texture,
-                        panelTexture: controlsPanel.texture,
-                        pointerPosition: controlsPanel.interaction.pointerPosition,
+                        videoTexture: videoFrame?.texture,
                         commandBuffer: commandBuffer
+                    )
+                }
+
+                if showPanel {
+                    try panelRenderer.encode(
+                        frame: xrFrame,
+                        swapchainTexture: texture,
+                        panelTexture: panel.texture,
+                        pointerPosition: panel.interaction.pointerPosition,
+                        commandBuffer: commandBuffer,
+                        clearBeforePanel: currentRenderer == nil
                     )
                 }
             }
@@ -309,13 +401,13 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                let view = frame.views.first {
                 ambisonic.updateHeadOrientation(
                     from: view,
-                    sceneAnchor: renderer.sceneAnchor
+                    sceneAnchor: renderer?.sceneAnchor
                 )
             }
 
             if frameIndex % 180 == 0 {
                 let periodMS = Double(frame.predictedDisplayPeriod) / 1_000_000.0
-                if let videoFrame {
+                if let videoFrame, let source {
                     print(
                         String(
                             format: "XR frame %d: video=%dx%d t=%.2fs rate=%.2f decoded=%d XR period=%.3f ms",
@@ -331,11 +423,9 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     print(
                         String(
-                            format: "XR frame %d: NO VIDEO FRAME t=%.2fs rate=%.2f item=%@ XR period=%.3f ms",
+                            format: "XR frame %d: browser/player UI mode=%@ XR period=%.3f ms",
                             frameIndex,
-                            source.currentTimeSeconds,
-                            source.playbackRate,
-                            source.itemStatusDescription,
+                            String(describing: libraryModel.mode),
                             periodMS
                         )
                     )
@@ -346,6 +436,56 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             scheduleFrameStep()
         } catch {
             fail(error)
+        }
+    }
+
+    private func enterYouTubeBrowser() {
+        libraryModel?.mode = .youtube
+        panelVisible = true
+        lastPanelActivity = Date()
+        panel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
+        panel?.invalidate()
+        youtubeBrowser?.open()
+    }
+
+    private func leaveYouTubeToFiles() {
+        youtubeBrowser?.close()
+        libraryModel?.showFiles()
+        panelVisible = true
+        panel?.invalidate()
+    }
+
+    private func handlePanelInteraction(_ event: XRPanelInteractionEvent) {
+        notePanelActivity()
+
+        guard libraryModel?.mode == .youtube else { return }
+
+        switch event {
+        case .pointerMoved, .pointerMovedBy:
+            youtubeBrowser?.pointerMoved()
+
+        case .pointerUp(.primary):
+            guard let point = panel?.interaction.pointerPosition else { return }
+            if point.y <= 0.09 && point.x <= 0.12 {
+                leaveYouTubeToFiles()
+            } else if point.y <= 0.09 && point.x <= 0.24 {
+                if youtubeBrowser?.back() != true {
+                    leaveYouTubeToFiles()
+                }
+            } else {
+                youtubeBrowser?.click(at: point)
+            }
+
+        case let .scroll(delta):
+            youtubeBrowser?.scroll(delta)
+
+        case .back:
+            if youtubeBrowser?.back() != true {
+                leaveYouTubeToFiles()
+            }
+
+        default:
+            break
         }
     }
 
@@ -362,8 +502,24 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ command: VideoControlCommand) throws {
-        guard let source, let renderer else { return }
         notePanelActivity()
+
+        switch command {
+        case .showFiles:
+            libraryModel?.showFiles()
+            panelVisible = true
+            panel?.invalidate()
+            return
+
+        case .showYouTube:
+            enterYouTubeBrowser()
+            return
+
+        default:
+            break
+        }
+
+        guard let source, let renderer else { return }
 
         switch command {
         case .togglePlayback:
@@ -392,7 +548,10 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
         case let .setProjection(mode):
             renderer.setProjectionMode(mode)
-            controlsPanel?.invalidate()
+            panel?.invalidate()
+
+        case .showFiles, .showYouTube:
+            break
         }
     }
 
@@ -419,33 +578,114 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyController(_ controls: VideoControllerSnapshot) throws {
-        if controls.menu {
-            panelVisible.toggle()
-            lastPanelActivity = Date()
-            controlsPanel?.invalidate()
-        }
-        if controls.back {
-            panelVisible = false
-        }
-        if controls.togglePlay {
-            try handle(.togglePlayback)
-        }
-        if controls.seekSteps != 0 {
-            try handle(.seekBy(Double(controls.seekSteps) * 15))
-        }
-        if controls.volumeSteps != 0, let source {
-            try handle(.setVolume(source.volume + Float(controls.volumeSteps) * 0.05))
-        }
-        if controls.recenter {
-            try handle(.recenter)
-        }
+        guard let libraryModel else { return }
 
-        let stickX = stickAfterDeadZone(controls.rightX)
-        let stickY = stickAfterDeadZone(controls.rightY)
-        if stickX != 0 || stickY != 0 {
-            let yaw = stickX * abs(stickX) * 0.010
-            let pitch = -stickY * abs(stickY) * 0.010
-            renderer?.tilt(yawRadians: yaw, pitchRadians: pitch)
+        switch libraryModel.mode {
+        case .files:
+            if controls.navY != 0 {
+                libraryModel.moveSelection(controls.navY)
+                panel?.invalidate()
+            }
+            if controls.navX != 0 {
+                libraryModel.page(controls.navX)
+                panel?.invalidate()
+            }
+            if controls.select {
+                libraryModel.activateSelection()
+                panel?.invalidate()
+            }
+            if controls.back {
+                if source != nil {
+                    libraryModel.showControls()
+                    panelVisible = true
+                    panel?.invalidate()
+                } else {
+                    try requestSessionExitIfNeeded()
+                }
+            }
+            if controls.menu, source != nil {
+                libraryModel.showControls()
+                panelVisible = true
+                panel?.invalidate()
+            }
+
+        case .youtube:
+            let now = Date()
+            let dt = min(max(now.timeIntervalSince(lastYouTubeControllerUpdate), 0), 0.05)
+            lastYouTubeControllerUpdate = now
+
+            let lx = controls.leftX
+            let ly = controls.leftY
+            let magnitude = sqrt(lx * lx + ly * ly)
+            let deadZone: Float = 0.16
+            if magnitude > deadZone && dt > 0 {
+                let response = (min(magnitude, 1) - deadZone) / (1 - deadZone)
+                let curved = pow(response, 1.45)
+                let speed = Float(0.80 * dt) * curved
+                panel?.interaction.movePointer(
+                    by: SIMD2(lx / magnitude * speed, -ly / magnitude * speed)
+                )
+            }
+            if controls.navX != 0 || controls.navY != 0 {
+                panel?.interaction.movePointer(
+                    by: SIMD2(Float(controls.navX) * 0.075, Float(controls.navY) * 0.10)
+                )
+            }
+            if abs(controls.rightY) > 0.18 {
+                youtubeBrowser?.scroll(SIMD2(0, controls.rightY * 0.30))
+            }
+            if controls.select, let point = panel?.interaction.pointerPosition {
+                youtubeBrowser?.click(at: point)
+            }
+            if controls.back {
+                if youtubeBrowser?.back() != true {
+                    leaveYouTubeToFiles()
+                }
+            }
+            if controls.menu, source != nil {
+                youtubeBrowser?.close()
+                libraryModel.showControls()
+                panelVisible = true
+                panel?.invalidate()
+            }
+
+        case .loading:
+            if controls.back {
+                mediaOpenGeneration += 1
+                mediaOpenTask?.cancel()
+                libraryModel.showFiles()
+                panel?.invalidate()
+            }
+
+        case .controls:
+            if controls.menu {
+                panelVisible.toggle()
+                lastPanelActivity = Date()
+                panel?.invalidate()
+            }
+            if controls.back {
+                panelVisible = false
+            }
+            if controls.togglePlay {
+                try handle(.togglePlayback)
+            }
+            if controls.seekSteps != 0 {
+                try handle(.seekBy(Double(controls.seekSteps) * 15))
+            }
+            if controls.volumeSteps != 0, let source {
+                try handle(.setVolume(source.volume + Float(controls.volumeSteps) * 0.05))
+            }
+            if controls.recenter {
+                try handle(.recenter)
+            }
+
+            let stickX = stickAfterDeadZone(controls.rightX)
+            let stickY = stickAfterDeadZone(controls.rightY)
+            if stickX != 0 || stickY != 0 {
+                let yaw = stickX * abs(stickX) * 0.010
+                let pitch = -stickY * abs(stickY) * 0.010
+                renderer?.tilt(yawRadians: yaw, pitchRadians: pitch)
+            }
         }
     }
 
@@ -466,18 +706,24 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             projectionMode: renderer.projectionMode,
             spatialAudioEnabled: ambisonic != nil
         )
-        if changed, panelVisible {
-            controlsPanel?.invalidate()
+        if changed, libraryModel?.mode == .controls, panelVisible {
+            panel?.invalidate()
         }
     }
 
     private func notePanelActivity() {
-        panelVisible = true
         lastPanelActivity = Date()
-        controlsPanel?.invalidate()
+        if libraryModel?.mode == .controls {
+            panelVisible = true
+        }
+        panel?.invalidate()
     }
 
     private func updatePanelVisibility() {
+        guard libraryModel?.mode == .controls else {
+            panelVisible = true
+            return
+        }
         guard panelVisible, controlsModel?.isScrubbing != true else { return }
         if Date().timeIntervalSince(lastPanelActivity) >= panelAutoHideSeconds {
             panelVisible = false
@@ -503,6 +749,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     private func requestSessionExitIfNeeded() throws {
         guard !exitRequested else { return }
         exitRequested = true
+        mediaOpenTask?.cancel()
+        youtubeBrowser?.close()
         pointerCapture?.stop()
         source?.pause()
         ambisonic?.pause()
@@ -525,6 +773,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
     private func fail(_ error: Error) {
         fputs("swiftxr-video: \(error)\n", stderr)
+        mediaOpenTask?.cancel()
+        youtubeBrowser?.close()
         pointerCapture?.stop()
         source?.pause()
         ambisonic?.pause()
@@ -549,18 +799,22 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 struct SwiftXRVideoPlayer {
     @MainActor
     static func main() {
-        guard CommandLine.arguments.count == 2 else {
+        guard CommandLine.arguments.count <= 2 else {
             fputs(
-                "usage: swiftxr-video /path/to/movie.mp4\n       swiftxr-video https://youtube.com/watch?v=...\n",
+                "usage: swiftxr-video [movie-or-youtube-url]\n",
                 stderr
             )
             exit(2)
         }
 
+        let initialInput = CommandLine.arguments.count == 2
+            ? CommandLine.arguments[1]
+            : nil
+
         let application = XRMacApplication.shared
         application.setActivationPolicy(.regular)
 
-        let appDelegate = VideoPlayerAppDelegate(rawInput: CommandLine.arguments[1])
+        let appDelegate = VideoPlayerAppDelegate(initialInput: initialInput)
         application.delegate = appDelegate
 
         withExtendedLifetime(appDelegate) {
