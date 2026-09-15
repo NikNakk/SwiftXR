@@ -1,5 +1,6 @@
 import CoreGraphics
 import Metal
+import MetalKit
 import SwiftUI
 
 public enum XRSwiftUIPanelError: Error, CustomStringConvertible {
@@ -21,18 +22,13 @@ public enum XRSwiftUIPanelError: Error, CustomStringConvertible {
 
 /// A hosted SwiftUI surface rendered into a shader-readable Metal texture.
 ///
-/// Unlike a simple snapshot, the SwiftUI hierarchy lives inside an off-screen
-/// `NSHostingView` with a real AppKit responder chain. Device-neutral panel
-/// interaction events are translated into AppKit mouse/key events so standard
-/// SwiftUI controls such as `Button`, `Toggle`, `Slider`, and `ScrollView` can
-/// respond without the application reimplementing their behavior.
-///
-/// The Metal texture is updated after panel interaction and when `refresh()` is
-/// called; it is still reused across XR frames and is not rerasterized at headset
-/// refresh rate.
+/// The SwiftUI hierarchy lives inside an off-screen `NSHostingView` with a real
+/// AppKit responder chain. Device-neutral panel interaction events are translated
+/// into AppKit mouse/key events so standard SwiftUI controls can respond.
 @MainActor
 public final class XRSwiftUIPanel<Content: View> {
     private let device: any MTLDevice
+    private let textureLoader: MTKTextureLoader
     private let host: XRSwiftUIHost<Content>
 
     public let pointSize: CGSize
@@ -55,10 +51,7 @@ public final class XRSwiftUIPanel<Content: View> {
         interactionHandler: XRPanelInteraction.Handler? = nil,
         @ViewBuilder content: () -> Content
     ) throws {
-        self.device = device
-        self.pointSize = pointSize
-        self.scale = scale
-
+        let textureLoader = MTKTextureLoader(device: device)
         let interaction = XRPanelInteraction(handler: interactionHandler)
         let host = XRSwiftUIHost(
             pointSize: pointSize,
@@ -66,10 +59,18 @@ public final class XRSwiftUIPanel<Content: View> {
             content: content()
         )
         let image = try host.renderImage()
+        let texture = try Self.makeTexture(
+            loader: textureLoader,
+            image: image
+        )
 
+        self.device = device
+        self.textureLoader = textureLoader
+        self.pointSize = pointSize
+        self.scale = scale
         self.interaction = interaction
         self.host = host
-        self.texture = try Self.makeTexture(device: device, image: image)
+        self.texture = texture
 
         interaction.setInternalHandler { [weak self, weak interaction] event in
             guard let self, let interaction else { return }
@@ -79,14 +80,11 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            // Most AppKit/SwiftUI control updates are observable immediately when
-            // the responder call returns, so refresh synchronously for CLI-style
-            // XR loops that do not otherwise spin the AppKit run loop.
+            // Refresh after interaction so standard SwiftUI state changes become
+            // visible in XR. MetalKit handles the image-origin conversion; the
+            // resulting texture is simply swapped in on the next XR frame.
             try? self.refresh()
 
-            // Some SwiftUI state propagation is deferred to the next main-loop
-            // turn; refresh once more then as a safety net when a normal app run
-            // loop is present.
             DispatchQueue.main.async { [weak self] in
                 try? self?.refresh()
             }
@@ -98,95 +96,32 @@ public final class XRSwiftUIPanel<Content: View> {
         interaction.send(event)
     }
 
-    /// Rasterize the hosted SwiftUI hierarchy again and update the Metal texture.
-    ///
-    /// Call this after application-driven model changes that did not originate
-    /// from `interaction`. Input events sent through the panel refresh it
-    /// automatically.
+    /// Rasterize the hosted SwiftUI hierarchy again and replace its Metal
+    /// texture. The renderer should read `texture` again before drawing.
     public func refresh() throws {
         let image = try host.renderImage()
-
-        if texture.width != image.width || texture.height != image.height {
-            texture = try Self.makeTexture(device: device, image: image)
-            return
-        }
-
-        try Self.upload(image: image, to: texture)
+        texture = try Self.makeTexture(
+            loader: textureLoader,
+            image: image
+        )
     }
 
     private static func makeTexture(
-        device: any MTLDevice,
+        loader: MTKTextureLoader,
         image: CGImage
     ) throws -> any MTLTexture {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm_srgb,
-            width: image.width,
-            height: image.height,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead]
-        descriptor.storageMode = .shared
+        let options: [MTKTextureLoader.Option: Any] = [
+            .SRGB: true,
+            .origin: MTKTextureLoader.Origin.topLeft,
+            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+            .textureStorageMode: NSNumber(value: MTLStorageMode.shared.rawValue),
+        ]
 
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw XRSwiftUIPanelError.textureCreationFailed
-        }
+        let texture = try loader.newTexture(
+            cgImage: image,
+            options: options
+        )
         texture.label = "SwiftXR hosted SwiftUI panel"
-
-        try upload(image: image, to: texture)
         return texture
-    }
-
-    private static func upload(
-        image: CGImage,
-        to texture: any MTLTexture
-    ) throws {
-        let width = image.width
-        let height = image.height
-        let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        var pixels = [UInt8](
-            repeating: 0,
-            count: bytesPerRow * height
-        )
-
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
-        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue |
-            CGImageAlphaInfo.premultipliedLast.rawValue
-
-        let drewImage = pixels.withUnsafeMutableBytes { storage -> Bool in
-            guard let context = CGContext(
-                data: storage.baseAddress,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: bitmapInfo
-            ) else {
-                return false
-            }
-
-            context.translateBy(x: 0, y: CGFloat(height))
-            context.scaleBy(x: 1, y: -1)
-            context.draw(
-                image,
-                in: CGRect(x: 0, y: 0, width: width, height: height)
-            )
-            return true
-        }
-
-        guard drewImage else {
-            throw XRSwiftUIPanelError.bitmapContextCreationFailed
-        }
-
-        pixels.withUnsafeBytes { storage in
-            guard let baseAddress = storage.baseAddress else { return }
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, width, height),
-                mipmapLevel: 0,
-                withBytes: baseAddress,
-                bytesPerRow: bytesPerRow
-            )
-        }
     }
 }
