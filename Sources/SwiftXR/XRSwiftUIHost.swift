@@ -5,16 +5,6 @@ import SwiftUI
 private final class XRSwiftUIHostingWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
-
-    var syntheticEventDidDispatch: (() -> Void)?
-
-    override func sendEvent(_ event: NSEvent) {
-        super.sendEvent(event)
-
-        if event.eventNumber == swiftXRSyntheticPanelEventNumber {
-            syntheticEventDidDispatch?()
-        }
-    }
 }
 
 @MainActor
@@ -25,6 +15,7 @@ final class XRSwiftUIHost<Content: View> {
     private let window: XRSwiftUIHostingWindow
     private let hostingView: NSHostingView<Content>
     private var pressedButtons: Set<XRPanelPointerButton> = []
+    private var pendingAccessibilityButton: (any NSAccessibilityProtocol)?
 
     init(
         pointSize: CGSize,
@@ -63,10 +54,6 @@ final class XRSwiftUIHost<Content: View> {
 
         self.window = window
         self.hostingView = hostingView
-    }
-
-    func setSyntheticEventDispatchHandler(_ handler: @escaping () -> Void) {
-        window.syntheticEventDidDispatch = handler
     }
 
     func renderImage() throws -> CGImage {
@@ -114,19 +101,19 @@ final class XRSwiftUIHost<Content: View> {
 
         case .pointerMoved, .pointerMovedBy:
             guard let pointerPosition else { return }
-            postPointerMove(to: pointerPosition)
+            sendPointerMove(to: pointerPosition)
 
         case .pointerExited:
-            break
+            pendingAccessibilityButton = nil
 
         case let .pointerDown(button):
             guard let pointerPosition else { return }
             pressedButtons.insert(button)
-            postPointerButton(button, down: true, at: pointerPosition)
+            sendPointerButton(button, down: true, at: pointerPosition)
 
         case let .pointerUp(button):
             guard let pointerPosition else { return }
-            postPointerButton(button, down: false, at: pointerPosition)
+            sendPointerButton(button, down: false, at: pointerPosition)
             pressedButtons.remove(button)
 
         case let .scroll(delta):
@@ -143,12 +130,15 @@ final class XRSwiftUIHost<Content: View> {
         }
     }
 
-    /// Post pointer motion onto NSApplication's event queue rather than calling
-    /// NSWindow.sendEvent synchronously from inside the physical-mouse capture
-    /// monitor. This lets SwiftUI gesture recognizers see an ordinary ordered
-    /// mouseDown -> mouseDragged -> mouseUp stream.
-    private func postPointerMove(to normalizedPosition: SIMD2<Float>) {
+    private func sendPointerMove(to normalizedPosition: SIMD2<Float>) {
         prepareForInteraction()
+
+        // A SwiftUI Button is activated through the accessibility fallback below.
+        // While it is held, do not feed an unmatched drag stream into the hosting
+        // view: merely update XRPanelInteraction's virtual pointer position.
+        if pendingAccessibilityButton != nil && pressedButtons.contains(.primary) {
+            return
+        }
 
         let point = windowPoint(for: normalizedPosition)
         let type: NSEvent.EventType
@@ -168,22 +158,52 @@ final class XRSwiftUIHost<Content: View> {
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber,
             context: nil,
-            eventNumber: swiftXRSyntheticPanelEventNumber,
+            eventNumber: 0,
             clickCount: pressedButtons.isEmpty ? 0 : 1,
             pressure: pressedButtons.isEmpty ? 0 : 1
         ) else {
             return
         }
 
-        NSApplication.shared.postEvent(event, atStart: false)
+        // This direct host-window path is known to preserve normal Toggle and
+        // Slider interaction in the off-screen SwiftUI hierarchy.
+        window.sendEvent(event)
     }
 
-    private func postPointerButton(
+    private func sendPointerButton(
         _ button: XRPanelPointerButton,
         down: Bool,
         at normalizedPosition: SIMD2<Float>
     ) {
         prepareForInteraction()
+
+        if button == .primary {
+            if down {
+                // Standard SwiftUI Button actions have not reliably completed via
+                // synthetic AppKit mouse-up events, although Toggle and Slider do.
+                // Use SwiftUI's accessibility element for the semantic Button
+                // press only when hit-testing identifies an actual button.
+                if let accessibilityButton = accessibilityButton(
+                    at: normalizedPosition
+                ) {
+                    pendingAccessibilityButton = accessibilityButton
+                    return
+                }
+            } else if let pendingAccessibilityButton {
+                defer { self.pendingAccessibilityButton = nil }
+
+                // Match normal button semantics: activate only if release is still
+                // over the same accessible button that was pressed.
+                if let releaseButton = accessibilityButton(
+                    at: normalizedPosition
+                ),
+                   (releaseButton as AnyObject) ===
+                        (pendingAccessibilityButton as AnyObject) {
+                    _ = releaseButton.accessibilityPerformPress()
+                }
+                return
+            }
+        }
 
         let point = windowPoint(for: normalizedPosition)
         let type: NSEvent.EventType
@@ -202,14 +222,31 @@ final class XRSwiftUIHost<Content: View> {
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber,
             context: nil,
-            eventNumber: swiftXRSyntheticPanelEventNumber,
+            eventNumber: 0,
             clickCount: 1,
             pressure: down ? 1 : 0
         ) else {
             return
         }
 
-        NSApplication.shared.postEvent(event, atStart: false)
+        window.sendEvent(event)
+    }
+
+    private func accessibilityButton(
+        at normalizedPosition: SIMD2<Float>
+    ) -> (any NSAccessibilityProtocol)? {
+        let pointInWindow = windowPoint(for: normalizedPosition)
+        let pointOnScreen = window.convertPoint(toScreen: pointInWindow)
+
+        guard
+            let hit = hostingView.accessibilityHitTest(pointOnScreen),
+            let accessible = hit as? any NSAccessibilityProtocol,
+            accessible.accessibilityRole() == .button
+        else {
+            return nil
+        }
+
+        return accessible
     }
 
     private func sendScroll(
