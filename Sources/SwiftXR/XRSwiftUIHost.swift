@@ -51,8 +51,8 @@ final class XRSwiftUIHost<Content: View> {
         window.makeFirstResponder(hostingView)
 
         // Keep a genuine AppKit responder/window hierarchy alive, but never put
-        // the SwiftUI panel on the user's visible desktop. Mouse events are
-        // queued explicitly with this window number by `handle(...)` below.
+        // the SwiftUI panel on the user's visible desktop. Button and drag events
+        // are queued explicitly with this window number by `handle(...)` below.
         window.orderFront(nil)
 
         self.window = window
@@ -84,10 +84,11 @@ final class XRSwiftUIHost<Content: View> {
     /// Translate SwiftXR's device-neutral panel interaction into a coherent
     /// AppKit mouse stream addressed to this off-screen hosting window.
     ///
-    /// Mouse events are posted through NSApplication rather than sent directly
-    /// to NSWindow. This matters for native controls such as NSSlider/SwiftUI
-    /// Slider: their nested AppKit tracking loop can dequeue the subsequent
-    /// dragged/up events normally.
+    /// Button and drag events are posted through NSApplication rather than sent
+    /// directly to NSWindow. This matters for native controls such as
+    /// NSSlider/SwiftUI Slider: their nested AppKit tracking loop can dequeue the
+    /// subsequent dragged/up events normally. Ordinary hover movement is sent
+    /// synchronously so it cannot build a queue ahead of a later click.
     func handle(
         _ event: XRPanelInteractionEvent,
         pointerPosition: SIMD2<Float>?
@@ -114,7 +115,7 @@ final class XRSwiftUIHost<Content: View> {
 
         case .pointerMoved, .pointerMovedBy:
             guard let pointerPosition else { return }
-            postPointerMove(to: pointerPosition)
+            deliverPointerMove(to: pointerPosition)
 
         case .pointerExited:
             break
@@ -148,7 +149,7 @@ final class XRSwiftUIHost<Content: View> {
         }
     }
 
-    private func postPointerMove(to normalizedPosition: SIMD2<Float>) {
+    private func deliverPointerMove(to normalizedPosition: SIMD2<Float>) {
         prepareForInteraction()
 
         let type: NSEvent.EventType
@@ -169,10 +170,17 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        // Append rather than prepend. If several events are generated before
-        // AppKit drains the queue, mouseDown -> dragged -> mouseUp ordering is
-        // therefore preserved.
-        NSApplication.shared.postEvent(event, atStart: false)
+        if type == .mouseMoved {
+            // Hover does not need to participate in an AppKit nested tracking
+            // loop. Sending it immediately prevents a high-rate XR pointer from
+            // filling the application event queue and delaying a subsequent
+            // mouseDown/mouseUp pair.
+            window.sendEvent(event)
+        } else {
+            // Dragged events must remain queued so a native Slider's nested
+            // tracking loop can dequeue them normally.
+            NSApplication.shared.postEvent(event, atStart: false)
+        }
     }
 
     private func postPointerButton(
