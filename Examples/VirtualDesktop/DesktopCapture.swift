@@ -62,7 +62,10 @@ final class DesktopCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     static func primaryDisplay(device: any MTLDevice) async throws -> DesktopCapture {
-        let content = try await shareableContent()
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        )
 
         guard let display = content.displays.first(where: { $0.frame.origin == .zero })
             ?? content.displays.first
@@ -127,6 +130,7 @@ final class DesktopCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         lock.lock()
         retainedCVTexture = nil
         retainedFrame = nil
+        retainedError = nil
         lock.unlock()
         CVMetalTextureCacheFlush(textureCache, 0)
     }
@@ -212,22 +216,5 @@ final class DesktopCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 presentationTime: presentationTime
             )
         )
-    }
-
-    private static func shareableContent() async throws -> SCShareableContent {
-        try await withCheckedThrowingContinuation { continuation in
-            SCShareableContent.getExcludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: true
-            ) { content, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let content {
-                    continuation.resume(returning: content)
-                } else {
-                    continuation.resume(throwing: DesktopCaptureError.noDisplayAvailable)
-                }
-            }
-        }
     }
 }
