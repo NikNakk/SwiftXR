@@ -67,11 +67,13 @@ private struct ImmersiveVideoUniforms {
     var anchorUp: SIMD4<Float>
     var anchorForward: SIMD4<Float>
     var parameters: SIMD4<Float>
+    var stereoParameters: SIMD4<Float>
 }
 
 final class VideoRenderer {
     let geometry: VideoSurfaceGeometry
     private(set) var projectionMode: VideoProjectionMode
+    private(set) var stereoLayout: VideoStereoLayout
 
     private let flatPipelineState: any MTLRenderPipelineState
     private let immersivePipelineState: any MTLRenderPipelineState
@@ -83,10 +85,12 @@ final class VideoRenderer {
         device: any MTLDevice,
         swapchain: XRSwapchain,
         displaySize: CGSize,
-        projectionMode: VideoProjectionMode
+        projectionMode: VideoProjectionMode,
+        stereoLayout: VideoStereoLayout
     ) throws {
         self.geometry = VideoSurfaceGeometry(displaySize: displaySize)
         self.projectionMode = projectionMode
+        self.stereoLayout = stereoLayout
 
         let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
         guard let flatVertex = library.makeFunction(name: "flat_video_vertex") else {
@@ -158,8 +162,19 @@ final class VideoRenderer {
     func setProjectionMode(_ mode: VideoProjectionMode) {
         guard mode != projectionMode else { return }
         projectionMode = mode
+        if mode == .flat || mode == .eac360 {
+            stereoLayout = .mono
+        } else if stereoLayout == .mono {
+            stereoLayout = .sideBySide
+        }
         anchor = nil
-        print("Projection: \(mode)")
+        print("Projection: \(mode); stereo: \(stereoLayout)")
+    }
+
+    func setStereoLayout(_ layout: VideoStereoLayout) {
+        guard layout != stereoLayout else { return }
+        stereoLayout = layout
+        print("Stereo layout: \(layout)")
     }
 
     func recenter() {
@@ -300,7 +315,8 @@ final class VideoRenderer {
                 Float(projectionMode.rawValue),
                 Float(texture.width),
                 Float(texture.height)
-            )
+            ),
+            stereoParameters: SIMD4(Float(stereoLayout.rawValue), 0, 0, 0)
         )
         encoder.setFragmentBytes(
             &uniforms,
@@ -332,6 +348,7 @@ final class VideoRenderer {
         float4 anchorUp;
         float4 anchorForward;
         float4 parameters;
+        float4 stereoParameters;
     };
 
     struct VideoVertexOut {
@@ -458,6 +475,7 @@ final class VideoRenderer {
         const float localForward = dot(worldRay, uniforms.anchorForward.xyz);
         const int eye = int(uniforms.parameters.x + 0.5);
         const int projectionMode = int(uniforms.parameters.y + 0.5);
+        const int stereoLayout = int(uniforms.stereoParameters.x + 0.5);
 
         if (projectionMode == 3) {
             const float3 gavDirection = float3(localX, localY, -localForward);
@@ -498,7 +516,12 @@ final class VideoRenderer {
             return float4(0.0, 0.0, 0.0, 1.0);
         }
 
-        const float2 uv = float2((eyeUV.x + float(eye)) * 0.5, eyeUV.y);
+        float2 uv = eyeUV;
+        if (stereoLayout == 1) {
+            uv = float2((eyeUV.x + float(eye)) * 0.5, eyeUV.y);
+        } else if (stereoLayout == 2) {
+            uv = float2(eyeUV.x, (eyeUV.y + float(eye)) * 0.5);
+        }
         return video.sample(videoSampler, uv);
     }
     """
