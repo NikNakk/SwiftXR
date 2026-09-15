@@ -16,6 +16,8 @@ final class XRSwiftUIHost<Content: View> {
         scale: CGFloat,
         content: Content
     ) {
+        _ = NSApplication.shared
+
         self.pointSize = pointSize
         self.scale = scale
 
@@ -39,6 +41,10 @@ final class XRSwiftUIHost<Content: View> {
         window.contentView = hostingView
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.makeFirstResponder(hostingView)
+
+        // Keep the surface backed by a real NSWindow/responder chain without
+        // placing anything visible on the user's desktop.
+        window.orderBack(nil)
 
         self.window = window
         self.hostingView = hostingView
@@ -261,6 +267,6 @@ final class XRSwiftUIHost<Content: View> {
 
     private static func functionKey(_ value: UInt32) -> String {
         guard let scalar = UnicodeScalar(value) else { return "" }
-        return String(Character(scalar))
+        return String(scalar)
     }
 }
