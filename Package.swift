@@ -25,6 +25,7 @@ let package = Package(
         .executable(name: "minimal-swiftxr-logo", targets: ["MinimalSwiftXRLogo"]),
         .executable(name: "swiftui-panel", targets: ["SwiftUIPanelExample"]),
         .executable(name: "swiftxr-desktop", targets: ["VirtualDesktopExample"]),
+        .executable(name: "swiftxr-video", targets: ["VideoPlayerExample"]),
     ],
     targets: [
         .systemLibrary(
@@ -64,6 +65,17 @@ let package = Package(
             path: "Examples/VirtualDesktop",
             exclude: ["README.md"],
             linkerSettings: openXRExecutableLinkerSettings
+        ),
+        .executableTarget(
+            name: "VideoPlayerExample",
+            dependencies: ["SwiftXR"],
+            path: "Examples/VideoPlayer",
+            exclude: ["README.md"],
+            linkerSettings: openXRExecutableLinkerSettings + [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("QuartzCore"),
+            ]
         ),
     ]
 )
