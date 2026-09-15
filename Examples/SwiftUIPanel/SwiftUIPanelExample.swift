@@ -108,20 +108,6 @@ private func configure(
     onPress(pad.buttonMenu) { panel.interaction.select() }
 }
 
-private enum SwiftUIPanelLaunchError: Error, CustomStringConvertible {
-    case executableNotFound
-    case launcherFailed(Int32)
-
-    var description: String {
-        switch self {
-        case .executableNotFound:
-            return "Could not locate the swiftui-panel executable"
-        case let .launcherFailed(status):
-            return "LaunchServices could not open the SwiftXR SwiftUI Panel app (open exited \(status))"
-        }
-    }
-}
-
 @MainActor
 private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     private var instance: XRInstance?
@@ -134,6 +120,10 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     private var exitRequested = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Plain Swift executables do not get LaunchServices activation for free.
+        // Activate explicitly, then repeat on the next main-queue turn after
+        // AppKit has completed finishLaunching. This replaces the temporary
+        // .app/NSPrincipalClass bootstrap used by the previous experiment.
         NSApplication.shared.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -224,6 +214,12 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
             if session.isRunning {
                 try startPointerCaptureIfReady()
 
+                // GAV-style physical input sampling. This keeps running even
+                // while an AppKit control such as Slider is inside its nested
+                // event-tracking loop, because frameStep is scheduled in that
+                // run-loop mode below.
+                pointerCapture.poll()
+
                 let controller = GCController.current ?? GCController.controllers().first
                 if controller !== configuredController {
                     configuredController = controller
@@ -286,7 +282,7 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
             #selector(frameStep),
             with: nil,
             afterDelay: delay,
-            inModes: [.common]
+            inModes: [.common, .eventTracking]
         )
     }
 
@@ -303,117 +299,19 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// AppKit must instantiate the SwiftXR application subclass itself. Calling
-/// `NSApplication.shared` from `main()` would create the default NSApplication
-/// singleton before NSPrincipalClass is consulted, so install the delegate here
-/// and enter through NSApplicationMain instead.
-@MainActor
-@objc(SwiftUIPanelApplication)
-private final class SwiftUIPanelApplication: XRMacApplication {
-    private var retainedDelegate: SwiftUIPanelAppDelegate?
-
-    override func finishLaunching() {
-        setActivationPolicy(.regular)
-
-        let appDelegate = SwiftUIPanelAppDelegate()
-        retainedDelegate = appDelegate
-        delegate = appDelegate
-
-        super.finishLaunching()
-    }
-}
-
 @main
 struct SwiftUIPanelExample {
     @MainActor
-    static func main() throws {
-        if Bundle.main.bundleURL.pathExtension.lowercased() != "app" {
-            try relaunchThroughLaunchServices()
-            return
-        }
+    static func main() {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.regular)
 
-        if let originalDirectory = ProcessInfo.processInfo.environment["SWIFTXR_ORIGINAL_CWD"] {
-            _ = FileManager.default.changeCurrentDirectoryPath(originalDirectory)
-        }
+        let appDelegate = SwiftUIPanelAppDelegate()
+        application.delegate = appDelegate
 
-        // Let AppKit read NSPrincipalClass and construct SwiftUIPanelApplication.
-        // Do not touch NSApplication.shared before this call.
-        _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
-    }
-
-    private static func relaunchThroughLaunchServices() throws {
-        let fileManager = FileManager.default
-
-        guard let sourceExecutable = Bundle.main.executableURL else {
-            throw SwiftUIPanelLaunchError.executableNotFound
-        }
-
-        let buildDirectory = sourceExecutable.deletingLastPathComponent()
-        let appURL = buildDirectory.appendingPathComponent(
-            "SwiftXR SwiftUI Panel.app",
-            isDirectory: true
-        )
-        let contentsURL = appURL.appendingPathComponent("Contents", isDirectory: true)
-        let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
-        let wrappedExecutable = macOSURL.appendingPathComponent("swiftui-panel")
-        let infoPlistURL = contentsURL.appendingPathComponent("Info.plist")
-
-        if fileManager.fileExists(atPath: appURL.path) {
-            try fileManager.removeItem(at: appURL)
-        }
-
-        try fileManager.createDirectory(
-            at: macOSURL,
-            withIntermediateDirectories: true
-        )
-        try fileManager.copyItem(at: sourceExecutable, to: wrappedExecutable)
-
-        let environment = ProcessInfo.processInfo.environment
-        let preservedPrefixes = [
-            "XR_", "XRT_", "PSVR2_", "MONADO_", "VK_", "MTL_",
-        ]
-        let preservedKeys: Set<String> = [
-            "HOME", "PATH", "TMPDIR",
-        ]
-
-        var launchEnvironment = environment.filter { key, _ in
-            preservedKeys.contains(key) ||
-                preservedPrefixes.contains(where: { key.hasPrefix($0) })
-        }
-        launchEnvironment["SWIFTXR_ORIGINAL_CWD"] = fileManager.currentDirectoryPath
-
-        let principalClassName = NSStringFromClass(SwiftUIPanelApplication.self)
-        let infoPlist: [String: Any] = [
-            "CFBundleDevelopmentRegion": "en",
-            "CFBundleDisplayName": "SwiftXR SwiftUI Panel",
-            "CFBundleExecutable": "swiftui-panel",
-            "CFBundleIdentifier": "com.niknakk.swiftxr.swiftui-panel",
-            "CFBundleInfoDictionaryVersion": "6.0",
-            "CFBundleName": "SwiftXR SwiftUI Panel",
-            "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": "0.1",
-            "CFBundleVersion": "1",
-            "LSMinimumSystemVersion": "14.0",
-            "NSHighResolutionCapable": true,
-            "NSPrincipalClass": principalClassName,
-            "LSEnvironment": launchEnvironment,
-        ]
-
-        let plistData = try PropertyListSerialization.data(
-            fromPropertyList: infoPlist,
-            format: .xml,
-            options: 0
-        )
-        try plistData.write(to: infoPlistURL, options: .atomic)
-
-        let launcher = Process()
-        launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        launcher.arguments = ["-n", appURL.path]
-        try launcher.run()
-        launcher.waitUntilExit()
-
-        guard launcher.terminationStatus == 0 else {
-            throw SwiftUIPanelLaunchError.launcherFailed(launcher.terminationStatus)
+        // Keep the delegate alive for the duration of AppKit's blocking run loop.
+        withExtendedLifetime(appDelegate) {
+            application.run()
         }
     }
 }
