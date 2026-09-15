@@ -153,14 +153,9 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        switch type {
-        case .leftMouseDragged:
-            hostingView.mouseDragged(with: event)
-        case .rightMouseDragged:
-            hostingView.rightMouseDragged(with: event)
-        default:
-            hostingView.mouseMoved(with: event)
-        }
+        // Let NSWindow perform normal hit-testing and responder dispatch into the
+        // hosted SwiftUI hierarchy rather than calling NSHostingView directly.
+        window.sendEvent(event)
     }
 
     private func sendPointerButton(
@@ -192,18 +187,7 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        switch type {
-        case .leftMouseDown:
-            hostingView.mouseDown(with: event)
-        case .leftMouseUp:
-            hostingView.mouseUp(with: event)
-        case .rightMouseDown:
-            hostingView.rightMouseDown(with: event)
-        case .rightMouseUp:
-            hostingView.rightMouseUp(with: event)
-        default:
-            break
-        }
+        window.sendEvent(event)
     }
 
     private func sendScroll(
@@ -233,7 +217,7 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        hostingView.scrollWheel(with: event)
+        window.sendEvent(event)
     }
 
     private func sendKey(
@@ -273,8 +257,8 @@ final class XRSwiftUIHost<Content: View> {
         }
 
         window.makeFirstResponder(hostingView)
-        hostingView.keyDown(with: down)
-        hostingView.keyUp(with: up)
+        window.sendEvent(down)
+        window.sendEvent(up)
     }
 
     private func windowPoint(for normalizedPosition: SIMD2<Float>) -> NSPoint {
