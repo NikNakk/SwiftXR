@@ -175,10 +175,14 @@ final class PanelRenderer {
             filter::linear
         );
 
-        float4 color = panel.sample(panelSampler, input.uv);
+        // The AppKit-backed bitmap reaches this quad rotated by 180 degrees in
+        // the current off-screen hosting path. Normalize it here so panel-space
+        // coordinates remain top-left based for both rendering and interaction.
+        float2 panelUV = float2(1.0 - input.uv.x, 1.0 - input.uv.y);
+        float4 color = panel.sample(panelSampler, panelUV);
 
         if (uniforms.pointer.z > 0.5) {
-            float2 d = input.uv - uniforms.pointer.xy;
+            float2 d = panelUV - uniforms.pointer.xy;
             d.x *= uniforms.pointer.w;
             float distance = length(d);
 
