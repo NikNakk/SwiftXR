@@ -134,6 +134,15 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     private var exitRequested = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // This process is now a genuine LaunchServices-launched .app, so request
+        // normal foreground activation here rather than asking the original
+        // SwiftPM/Terminal child to promote itself. Repeat on the next run-loop
+        // turn because activation is asynchronous on current macOS.
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+
         do {
             try setUpXR()
             scheduleFrameStep()
@@ -239,9 +248,6 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
 
-                // One XR frame is deliberately processed per AppKit run-loop
-                // turn. xrWaitFrame provides the pacing; returning to NSApp.run()
-                // between frames lets normal mouse/SwiftUI events dispatch.
                 scheduleFrameStep()
             } else {
                 scheduleFrameStep(after: 0.005)
