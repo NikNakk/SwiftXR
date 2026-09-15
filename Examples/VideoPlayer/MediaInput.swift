@@ -33,6 +33,7 @@ enum MediaInputError: Error, CustomStringConvertible {
     }
 }
 
+@MainActor
 enum MediaInputResolver {
     private static let fileManager = FileManager.default
 
@@ -84,8 +85,6 @@ enum MediaInputResolver {
     }
 
     private static func cacheDirectory() throws -> URL {
-        // Reuse the mature GAV POC cache so existing downloads are immediately
-        // available to the SwiftXR port too.
         let url = fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/GAVPSVR2/YouTube", isDirectory: true)
         do {
@@ -282,25 +281,20 @@ enum MediaInputResolver {
         let template = cache
             .appendingPathComponent("%(title)s [YT] [%(id)s] [%(width)sx%(height)s].%(ext)s")
             .path
-        let result: ProcessResult
-        do {
-            result = try run(
-                "yt-dlp",
-                [
-                    "--no-playlist",
-                    "--no-warnings",
-                    "--format", "bv*[ext=mp4][vcodec^=av01]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]",
-                    "--merge-output-format", "mp4",
-                    "--write-info-json",
-                    "--output", template,
-                    "--print", "after_move:filepath",
-                    input,
-                ],
-                suppressStderr: false
-            )
-        } catch {
-            throw error
-        }
+        let result = try run(
+            "yt-dlp",
+            [
+                "--no-playlist",
+                "--no-warnings",
+                "--format", "bv*[ext=mp4][vcodec^=av01]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]",
+                "--merge-output-format", "mp4",
+                "--write-info-json",
+                "--output", template,
+                "--print", "after_move:filepath",
+                input,
+            ],
+            suppressStderr: false
+        )
         guard result.status == 0 else {
             throw MediaInputError.commandFailed("yt-dlp", result.status)
         }
