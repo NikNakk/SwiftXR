@@ -15,17 +15,11 @@ final class XRSwiftUIHost<Content: View> {
     private let window: XRSwiftUIHostingWindow
     private let hostingView: NSHostingView<Content>
 
-    // Semantic-pointer state. The native macOS mouse path bypasses these
-    // synthetic semantics and instead transforms the real AppKit event stream.
+    // Device-neutral semantic-pointer state. The real macOS mouse path bypasses
+    // this and lets AppKit deliver genuine events to NSHostingView.
     private var pressedButtons: Set<XRPanelPointerButton> = []
     private var pendingAccessibilityButton = false
-
-    // Non-zero only while a native mouseDown is being dispatched directly to
-    // the hosted SwiftUI window. AppKit controls may synchronously enter a
-    // nested tracking loop from mouseDown. Re-entrant nextEvent(...) calls from
-    // that loop must receive the transformed drag/up event rather than having it
-    // dispatched a second time here.
-    private var nativeTrackingDispatchDepth = 0
+    private var isRealMouseSurfaceActive = false
 
     init(
         pointSize: CGSize,
@@ -40,6 +34,7 @@ final class XRSwiftUIHost<Content: View> {
         let frame = NSRect(origin: .zero, size: pointSize)
         let hostingView = NSHostingView(rootView: content)
         hostingView.frame = frame
+        hostingView.bounds = frame
         hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
 
@@ -54,13 +49,10 @@ final class XRSwiftUIHost<Content: View> {
         window.backgroundColor = .clear
         window.hasShadow = false
         window.acceptsMouseMovedEvents = true
+        window.ignoresMouseEvents = false
         window.contentView = hostingView
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.makeFirstResponder(hostingView)
-
-        // Keep a real, ordered AppKit window/responder chain. The window is far
-        // off screen, so ordering it normally does not expose the rendered panel
-        // on the desktop, but it does keep AppKit's interaction machinery alive.
         window.orderFront(nil)
 
         self.window = window
@@ -71,8 +63,25 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(
-            in: hostingView.bounds
+        // Keep raster resolution independent of the on-screen interaction
+        // surface. During real-mouse capture the hosting view's frame spans the
+        // desktop while its logical bounds remain `pointSize`; this explicit
+        // bitmap therefore remains pointSize × scale rather than growing to the
+        // desktop backing resolution.
+        let pixelsWide = max(1, Int((pointSize.width * scale).rounded(.up)))
+        let pixelsHigh = max(1, Int((pointSize.height * scale).rounded(.up)))
+
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelsWide,
+            pixelsHigh: pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
         ) else {
             throw XRSwiftUIPanelError.bitmapContextCreationFailed
         }
@@ -86,117 +95,94 @@ final class XRSwiftUIHost<Content: View> {
         return image
     }
 
-    // MARK: - Native macOS mouse path
+    // MARK: - Real macOS mouse surface
 
-    func prepareForNativeMouseCapture() {
-        prepareForInteraction()
-    }
-
-    /// Convert a physical mouse/trackpad event into interaction with the
-    /// off-screen SwiftUI window.
-    ///
-    /// Top-level events are dispatched directly to the known host window. This
-    /// is the path already proven to work for normal SwiftUI hit testing. If a
-    /// control synchronously enters an AppKit tracking loop from mouseDown,
-    /// `nativeTrackingDispatchDepth` is non-zero; drag/up events obtained by the
-    /// tracking loop's re-entrant nextEvent(...) call are then returned to that
-    /// loop instead of being dispatched here. This preserves genuine native
-    /// Slider/Button tracking without relying on NSEvent local monitors.
-    func transformNativeMouseEvent(
-        _ source: NSEvent,
-        pointerPosition: SIMD2<Float>
-    ) -> NSEvent? {
-        prepareForInteraction()
-
-        switch source.type {
-        case .mouseMoved,
-             .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-             .leftMouseDown, .leftMouseUp,
-             .rightMouseDown, .rightMouseUp,
-             .otherMouseDown, .otherMouseUp:
-            guard let event = retargetedMouseEvent(
-                source,
-                pointerPosition: pointerPosition
-            ) else {
-                return nil
-            }
-
-            // A control is currently asking NSApplication.nextEvent(...) for its
-            // next tracking event. Return the transformed event directly to that
-            // nested loop so Slider/drag tracking sees the complete sequence.
-            if nativeTrackingDispatchDepth > 0 {
-                return event
-            }
-
-            switch source.type {
-            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-                nativeTrackingDispatchDepth += 1
-                defer { nativeTrackingDispatchDepth -= 1 }
-                window.sendEvent(event)
-                return nil
-
-            default:
-                // Mouse move/up outside a nested tracking loop is delivered
-                // directly to the known SwiftUI host. This also avoids relying on
-                // NSApplication to rediscover an off-screen target window.
-                window.sendEvent(event)
-                return nil
-            }
-
-        case .scrollWheel:
-            sendNativeScroll(source, pointerPosition: pointerPosition)
-            return nil
-
-        default:
-            return source
+    /// Turn the actual hosted SwiftUI hierarchy into a desktop-sized, effectively
+    /// invisible interaction surface. The mouse remains associated with the
+    /// system cursor, so AppKit and SwiftUI receive completely ordinary native
+    /// mouse/trackpad events, including hover and nested control tracking.
+    func beginRealMouseCaptureSurface() {
+        guard !isRealMouseSurfaceActive else {
+            prepareForInteraction()
+            return
         }
+
+        let screens = NSScreen.screens
+        guard let first = screens.first else {
+            prepareForInteraction()
+            return
+        }
+
+        let desktopFrame = screens.dropFirst().reduce(first.frame) { partial, screen in
+            partial.union(screen.frame)
+        }
+
+        isRealMouseSurfaceActive = true
+        window.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle,
+        ]
+        window.level = .screenSaver
+
+        // Window alpha affects desktop compositing, not cacheDisplay() of the
+        // hosted view. Keep it non-zero so AppKit continues treating the window
+        // as a normal interactive surface while making it visually negligible.
+        window.alphaValue = 0.001
+        window.setFrame(desktopFrame, display: false)
+
+        // NSWindow sizes its content view to the desktop-sized content rect. By
+        // restoring the original logical bounds we let AppKit perform the useful
+        // coordinate transform for us: real desktop cursor coordinates map
+        // directly into the panel's 0...pointSize SwiftUI coordinate system.
+        hostingView.bounds = NSRect(origin: .zero, size: pointSize)
+
+        window.orderFrontRegardless()
+        window.makeKey()
+        window.makeFirstResponder(hostingView)
     }
 
-    private func retargetedMouseEvent(
-        _ source: NSEvent,
-        pointerPosition: SIMD2<Float>
-    ) -> NSEvent? {
-        let point = windowPoint(for: pointerPosition)
+    func endRealMouseCaptureSurface() {
+        guard isRealMouseSurfaceActive else { return }
+        isRealMouseSurfaceActive = false
 
-        return NSEvent.mouseEvent(
-            with: source.type,
-            location: point,
-            modifierFlags: source.modifierFlags,
-            timestamp: source.timestamp,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: source.eventNumber,
-            clickCount: source.clickCount,
-            pressure: source.pressure
+        window.alphaValue = 1
+        window.level = .normal
+        window.collectionBehavior = []
+        window.setFrame(
+            NSRect(origin: NSPoint(x: -20_000, y: -20_000), size: pointSize),
+            display: false
         )
+        hostingView.bounds = NSRect(origin: .zero, size: pointSize)
+        window.orderFront(nil)
     }
 
-    private func sendNativeScroll(
-        _ source: NSEvent,
-        pointerPosition: SIMD2<Float>
-    ) {
-        let x = Int32(source.scrollingDeltaX.rounded())
-        let y = Int32(source.scrollingDeltaY.rounded())
+    /// Current real macOS cursor position expressed in SwiftXR's normalized
+    /// top-left panel coordinates. Because the hosting view spans the desktop in
+    /// frame coordinates, this is the same mapping AppKit uses for control hit
+    /// testing and hover.
+    func realMousePointerPosition() -> SIMD2<Float>? {
+        guard isRealMouseSurfaceActive else { return nil }
 
-        guard let cgEvent = CGEvent(
-            scrollWheelEvent2Source: nil,
-            units: source.hasPreciseScrollingDeltas ? .pixel : .line,
-            wheelCount: 2,
-            wheel1: y,
-            wheel2: x,
-            wheel3: 0
-        ) else {
-            return
+        let pointInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let pointInHost = hostingView.convert(pointInWindow, from: nil)
+
+        let width = max(hostingView.bounds.width, 1)
+        let height = max(hostingView.bounds.height, 1)
+
+        let x = Float(pointInHost.x / width)
+        let y: Float
+        if hostingView.isFlipped {
+            y = Float(pointInHost.y / height)
+        } else {
+            y = Float(1 - pointInHost.y / height)
         }
 
-        let pointInWindow = windowPoint(for: pointerPosition)
-        cgEvent.location = window.convertPoint(toScreen: pointInWindow)
-
-        guard let event = NSEvent(cgEvent: cgEvent) else {
-            return
-        }
-
-        window.sendEvent(event)
+        return SIMD2(
+            min(max(x, 0), 1),
+            min(max(y, 0), 1)
+        )
     }
 
     // MARK: - Device-neutral semantic path
@@ -306,9 +292,7 @@ final class XRSwiftUIHost<Content: View> {
                 }
             } else if pendingAccessibilityButton {
                 pendingAccessibilityButton = false
-                if let releaseButton = accessibilityButton(
-                    at: normalizedPosition
-                ) {
+                if let releaseButton = accessibilityButton(at: normalizedPosition) {
                     _ = releaseButton.accessibilityPerformPress()
                 }
                 return
