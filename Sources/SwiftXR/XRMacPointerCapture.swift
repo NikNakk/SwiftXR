@@ -68,21 +68,6 @@ public final class XRMacPointerCapture: NSObject {
         )
     }
 
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-
-        // Normal lifetime cleanup is deliberately performed by `stop()` and by
-        // the application-resign-active observer. Avoid touching main-actor
-        // AppKit objects from a potentially nonisolated deinitializer under
-        // Swift 6 strict concurrency checking.
-        if isCaptured {
-            _ = CGAssociateMouseAndMouseCursorPosition(1)
-            if let savedCursorPosition {
-                CGWarpMouseCursorPosition(savedCursorPosition)
-            }
-        }
-    }
-
     /// Activate the application and begin exclusive relative-pointer capture.
     public func start() throws {
         guard !isCaptureRequested else { return }
@@ -101,6 +86,10 @@ public final class XRMacPointerCapture: NSObject {
     }
 
     /// Stop capture and return the pointing device to normal macOS behavior.
+    ///
+    /// Applications should pair every successful `start()` with `stop()`; the
+    /// SwiftUI sample does this with `defer`. Focus loss also releases the
+    /// physical capture automatically.
     public func stop() {
         isCaptureRequested = false
         releasePhysicalCapture(restoreCursor: true)
