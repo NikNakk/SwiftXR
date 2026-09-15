@@ -97,8 +97,16 @@ public final class XRSwiftUIPanel<Content: View> {
 
     /// Refresh only when native AppKit input has changed the hosted surface.
     /// Applications using `XRMacPointerCapture(panel:)` should call this once per
-    /// XR frame before drawing the panel. In the common case it is a cheap no-op.
+    /// XR frame before drawing the panel. It also samples the real system cursor
+    /// so the XR software cursor continues to track during AppKit nested control
+    /// tracking (for example while a Slider is being dragged).
     public func refreshIfNeeded() throws {
+        if let position = host.realMousePointerPosition(),
+           interaction.pointerPosition != position {
+            interaction.setNativePointerPosition(position)
+            nativeInputNeedsRefresh = true
+        }
+
         guard nativeInputNeedsRefresh else { return }
         nativeInputNeedsRefresh = false
         try refresh()
