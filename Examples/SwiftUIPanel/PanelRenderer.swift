@@ -9,6 +9,7 @@ private struct PanelVertex {
 
 private struct PanelUniforms {
     var viewProjection: simd_float4x4
+    var pointer: SIMD4<Float>
 }
 
 final class PanelRenderer {
@@ -16,6 +17,8 @@ final class PanelRenderer {
     private let vertexBuffer: any MTLBuffer
     private let panelTexture: any MTLTexture
     private let vertexCount: Int
+
+    var pointerPosition: SIMD2<Float>?
 
     init(
         device: any MTLDevice,
@@ -94,10 +97,17 @@ final class PanelRenderer {
                 throw PanelRendererError.encoderCreationFailed
             }
 
+            let pointer = pointerPosition ?? .zero
             var uniforms = PanelUniforms(
                 viewProjection: frame.views[eye].viewProjectionMatrix(
                     nearZ: 0.05,
                     farZ: 20
+                ),
+                pointer: SIMD4(
+                    pointer.x,
+                    pointer.y,
+                    pointerPosition == nil ? 0 : 1,
+                    Float(panelTexture.width) / Float(panelTexture.height)
                 )
             )
 
@@ -130,6 +140,7 @@ final class PanelRenderer {
 
     struct PanelUniforms {
         float4x4 viewProjection;
+        float4 pointer;
     };
 
     struct PanelVertexOut {
@@ -151,13 +162,29 @@ final class PanelRenderer {
 
     fragment float4 panel_fragment(
         PanelVertexOut input [[stage_in]],
+        constant PanelUniforms &uniforms [[buffer(1)]],
         texture2d<float> panel [[texture(0)]])
     {
         constexpr sampler panelSampler(
             address::clamp_to_edge,
             filter::linear
         );
-        return panel.sample(panelSampler, input.uv);
+
+        float4 color = panel.sample(panelSampler, input.uv);
+
+        if (uniforms.pointer.z > 0.5) {
+            float2 d = input.uv - uniforms.pointer.xy;
+            d.x *= uniforms.pointer.w;
+            float distance = length(d);
+
+            if (distance < 0.010) {
+                color = float4(1.0, 1.0, 1.0, 1.0);
+            } else if (distance < 0.016) {
+                color = float4(0.02, 0.02, 0.02, 1.0);
+            }
+        }
+
+        return color;
     }
     """
 }
