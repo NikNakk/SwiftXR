@@ -23,25 +23,25 @@ public enum XRMacPointerCaptureError: Error, CustomStringConvertible {
 /// - forwards relative input to `XRPanelInteraction`.
 ///
 /// Capture is suspended automatically while the application is inactive and is
-/// reacquired when it becomes active again. `stop()` always reconnects and
-/// restores the system cursor to the position it occupied before capture.
+/// reacquired when it becomes active again. `stop()` reconnects the pointing
+/// device and restores the system cursor to the position it occupied before the
+/// current capture interval.
 @MainActor
-public final class XRMacPointerCapture {
+public final class XRMacPointerCapture: NSObject {
     public let interaction: XRPanelInteraction
 
     /// Number of physical pointer delta units required to cross the panel.
     /// Larger values make the virtual XR pointer less sensitive.
     public var movementScale: SIMD2<Float>
 
-    /// Set when Escape is pressed while captured. The sample uses this as a
-    /// convenient request to leave XR; applications may simply clear it.
+    /// Set when Escape is pressed while captured. Applications can use this as
+    /// a convenient request to leave XR.
     public private(set) var escapeRequested = false
 
     public private(set) var isCaptureRequested = false
     public private(set) var isCaptured = false
 
     private var eventMonitor: Any?
-    private var activationObservers: [NSObjectProtocol] = []
     private var captureWindows: [NSWindow] = []
     private var savedCursorPosition: CGPoint?
     private var cursorHidden = false
@@ -52,37 +52,24 @@ public final class XRMacPointerCapture {
     ) {
         self.interaction = interaction
         self.movementScale = movementScale
+        super.init()
 
-        let center = NotificationCenter.default
-        activationObservers.append(
-            center.addObserver(
-                forName: NSApplication.didResignActiveNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.releasePhysicalCapture(restoreCursor: true)
-                }
-            }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidResignActive),
+            name: NSApplication.didResignActiveNotification,
+            object: nil
         )
-        activationObservers.append(
-            center.addObserver(
-                forName: NSApplication.didBecomeActiveNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self, self.isCaptureRequested else { return }
-                    try? self.acquirePhysicalCapture()
-                }
-            }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
         )
     }
 
     deinit {
-        for observer in activationObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        NotificationCenter.default.removeObserver(self)
 
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -93,7 +80,7 @@ public final class XRMacPointerCapture {
         }
 
         if isCaptured {
-            CGAssociateMouseAndMouseCursorPosition(1)
+            _ = CGAssociateMouseAndMouseCursorPosition(1)
             if cursorHidden {
                 NSCursor.unhide()
             }
@@ -128,6 +115,17 @@ public final class XRMacPointerCapture {
 
     public func clearEscapeRequest() {
         escapeRequested = false
+    }
+
+    @objc
+    private func applicationDidResignActive() {
+        releasePhysicalCapture(restoreCursor: true)
+    }
+
+    @objc
+    private func applicationDidBecomeActive() {
+        guard isCaptureRequested else { return }
+        try? acquirePhysicalCapture()
     }
 
     private func acquirePhysicalCapture() throws {
@@ -197,7 +195,9 @@ public final class XRMacPointerCapture {
                 .stationary,
                 .ignoresCycle,
             ]
-            window.contentView = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            window.contentView = NSView(
+                frame: NSRect(origin: .zero, size: screen.frame.size)
+            )
             window.orderFrontRegardless()
             return window
         }
@@ -236,13 +236,13 @@ public final class XRMacPointerCapture {
 
             return MainActor.assumeIsolated {
                 guard self.isCaptured else { return event }
-                self.handle(event)
-                return nil
+                return self.handle(event) ? nil : event
             }
         }
     }
 
-    private func handle(_ event: NSEvent) {
+    /// Returns true when the original AppKit event should be consumed.
+    private func handle(_ event: NSEvent) -> Bool {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let xScale = max(movementScale.x, 1)
@@ -253,15 +253,26 @@ public final class XRMacPointerCapture {
                     -Float(event.deltaY) / yScale
                 )
             )
+            return true
 
         case .leftMouseDown:
             interaction.pointerDown(.primary)
+            return true
         case .leftMouseUp:
             interaction.pointerUp(.primary)
+            return true
         case .rightMouseDown:
             interaction.pointerDown(.secondary)
+            return true
         case .rightMouseUp:
             interaction.pointerUp(.secondary)
+            return true
+
+        case .otherMouseDown, .otherMouseUp:
+            // Do not let auxiliary buttons leak through to desktop applications
+            // while the mouse is owned by XR, even though SwiftXR does not yet
+            // assign them a panel semantic.
+            return true
 
         case .scrollWheel:
             interaction.scroll(
@@ -270,13 +281,20 @@ public final class XRMacPointerCapture {
                     Float(event.scrollingDeltaY) / 40
                 )
             )
+            return true
 
         case .keyDown where event.keyCode == 53:
             escapeRequested = true
             stop()
+            return true
+
+        case .keyDown:
+            // Keyboard input is not part of pointer capture. In particular this
+            // lets normal system/app shortcuts such as Cmd-Tab continue to work.
+            return false
 
         default:
-            break
+            return true
         }
     }
 }
