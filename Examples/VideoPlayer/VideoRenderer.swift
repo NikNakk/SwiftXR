@@ -156,12 +156,24 @@ final class VideoRenderer {
             pass.colorAttachments[0].level = 0
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].storeAction = .store
-            pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: 0,
-                green: 0,
-                blue: 0,
-                alpha: 1
-            )
+            if videoTexture == nil {
+                // Deliberately visible diagnostic: if this colour remains on
+                // screen, OpenXR/Metal presentation works but AVFoundation has
+                // not supplied a decoded frame yet.
+                pass.colorAttachments[0].clearColor = MTLClearColor(
+                    red: 0.16,
+                    green: 0.0,
+                    blue: 0.10,
+                    alpha: 1
+                )
+            } else {
+                pass.colorAttachments[0].clearColor = MTLClearColor(
+                    red: 0,
+                    green: 0,
+                    blue: 0,
+                    alpha: 1
+                )
+            }
 
             guard let encoder = commandBuffer.makeRenderCommandEncoder(
                 descriptor: pass
