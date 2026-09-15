@@ -363,12 +363,13 @@ private struct VideoYouTubeBrowserView: View {
             }
             .foregroundStyle(.white)
         }
+        // Keep this surface exactly 1024x512 with no outer padding: the WebKit
+        // snapshot and document.elementFromPoint() then share identical pixels.
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(.white.opacity(0.15), lineWidth: 1.5)
         )
-        .padding(6)
     }
 }
 
