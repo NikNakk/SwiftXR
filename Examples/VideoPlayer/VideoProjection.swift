@@ -49,10 +49,13 @@ enum VideoProjectionMode: Int32, CaseIterable, CustomStringConvertible {
             (name.contains("360") && !name.contains("180")) {
             return .eac360
         }
-
-        // Match the mature GAV OpenXR POC default: immersive files are assumed
-        // to be SBS VR180 unless explicitly marked otherwise.
-        return .vr180Equirect
+        if name.contains("fisheye") {
+            return .vr180Fisheye
+        }
+        if name.contains("vr180") || name.contains("180") || name.contains("sbs") {
+            return .vr180Equirect
+        }
+        return .flat
     }
 }
 
