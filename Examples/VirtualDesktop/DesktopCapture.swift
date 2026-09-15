@@ -127,11 +127,7 @@ final class DesktopCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         try await stream.stopCapture()
         self.stream = nil
 
-        lock.lock()
-        retainedCVTexture = nil
-        retainedFrame = nil
-        retainedError = nil
-        lock.unlock()
+        clearRetainedState()
         CVMetalTextureCacheFlush(textureCache, 0)
     }
 
@@ -177,6 +173,14 @@ final class DesktopCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         lock.lock()
         retainedError = error
+        lock.unlock()
+    }
+
+    private func clearRetainedState() {
+        lock.lock()
+        retainedCVTexture = nil
+        retainedFrame = nil
+        retainedError = nil
         lock.unlock()
     }
 
