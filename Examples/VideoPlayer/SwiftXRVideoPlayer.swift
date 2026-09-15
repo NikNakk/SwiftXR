@@ -68,6 +68,10 @@ struct SwiftXRVideoPlayer {
             print(String(format: "Duration: %.2f s", duration))
         }
 
+        print("Waiting for AVPlayerItem readiness…")
+        try await source.waitUntilReady()
+        print("AVPlayerItem status: \(source.itemStatusDescription)")
+
         let renderer = try VideoRenderer(
             device: session.device,
             swapchain: swapchain,
@@ -137,6 +141,13 @@ struct SwiftXRVideoPlayer {
         var lastState = session.state
 
         while session.isRunning && !session.shouldExit {
+            // Match the working GAV OpenXR player: keep Foundation/AppKit media
+            // delivery alive even though xrWaitFrame drives a synchronous loop.
+            _ = RunLoop.current.run(
+                mode: .default,
+                before: Date(timeIntervalSinceNow: 0)
+            )
+
             for state in try session.pollEvents() where state != lastState {
                 print("Session state: \(state)")
                 lastState = state
@@ -176,11 +187,12 @@ struct SwiftXRVideoPlayer {
                 if let videoFrame {
                     print(
                         String(
-                            format: "XR frame %d: video=%dx%d t=%.2fs decoded=%d XR period=%.3f ms",
+                            format: "XR frame %d: video=%dx%d t=%.2fs rate=%.2f decoded=%d XR period=%.3f ms",
                             frameIndex,
                             videoFrame.texture.width,
                             videoFrame.texture.height,
                             playback,
+                            source.playbackRate,
                             decodedFrameCount,
                             periodMS
                         )
@@ -188,8 +200,11 @@ struct SwiftXRVideoPlayer {
                 } else {
                     print(
                         String(
-                            format: "XR frame %d: waiting for first decoded video frame, XR period=%.3f ms",
+                            format: "XR frame %d: NO VIDEO FRAME t=%.2fs rate=%.2f item=%@ XR period=%.3f ms",
                             frameIndex,
+                            playback,
+                            source.playbackRate,
+                            source.itemStatusDescription,
                             periodMS
                         )
                     )
