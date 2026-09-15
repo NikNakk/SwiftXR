@@ -13,6 +13,7 @@ final class XRSwiftUIHost<Content: View> {
     let scale: CGFloat
 
     private let window: XRSwiftUIHostingWindow
+    private let containerView: NSView
     private let hostingView: NSHostingView<Content>
 
     // Device-neutral semantic-pointer state. The real macOS mouse path bypasses
@@ -35,8 +36,12 @@ final class XRSwiftUIHost<Content: View> {
         let hostingView = NSHostingView(rootView: content)
         hostingView.frame = frame
         hostingView.bounds = frame
-        hostingView.autoresizingMask = [.width, .height]
+        hostingView.autoresizingMask = []
         hostingView.wantsLayer = true
+
+        let containerView = NSView(frame: frame)
+        containerView.autoresizingMask = [.width, .height]
+        containerView.addSubview(hostingView)
 
         let window = XRSwiftUIHostingWindow(
             contentRect: frame,
@@ -50,12 +55,13 @@ final class XRSwiftUIHost<Content: View> {
         window.hasShadow = false
         window.acceptsMouseMovedEvents = true
         window.ignoresMouseEvents = false
-        window.contentView = hostingView
+        window.contentView = containerView
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.makeFirstResponder(hostingView)
         window.orderFront(nil)
 
         self.window = window
+        self.containerView = containerView
         self.hostingView = hostingView
     }
 
@@ -63,25 +69,12 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        // Keep raster resolution independent of the on-screen interaction
-        // surface. During real-mouse capture the hosting view's frame spans the
-        // desktop while its logical bounds remain `pointSize`; this explicit
-        // bitmap therefore remains pointSize × scale rather than growing to the
-        // desktop backing resolution.
-        let pixelsWide = max(1, Int((pointSize.width * scale).rounded(.up)))
-        let pixelsHigh = max(1, Int((pointSize.height * scale).rounded(.up)))
-
-        guard let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixelsWide,
-            pixelsHigh: pixelsHigh,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
+        // Use AppKit's own caching representation. This is the path that gave us
+        // correct full-panel rendering before the real-mouse experiment. An
+        // explicitly allocated pointSize*scale bitmap caused cacheDisplay() to
+        // fill only one quadrant on Retina/2x panels.
+        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(
+            in: hostingView.bounds
         ) else {
             throw XRSwiftUIPanelError.bitmapContextCreationFailed
         }
@@ -97,10 +90,10 @@ final class XRSwiftUIHost<Content: View> {
 
     // MARK: - Real macOS mouse surface
 
-    /// Turn the actual hosted SwiftUI hierarchy into a desktop-sized, effectively
-    /// invisible interaction surface. The mouse remains associated with the
-    /// system cursor, so AppKit and SwiftUI receive completely ordinary native
-    /// mouse/trackpad events, including hover and nested control tracking.
+    /// Put the real hosted SwiftUI hierarchy inside an effectively invisible
+    /// desktop-sized interaction window without scaling the hosting view itself.
+    /// AppKit therefore delivers genuine mouse/trackpad events using the same
+    /// coordinates SwiftUI uses for layout and rasterization.
     func beginRealMouseCaptureSurface() {
         guard !isRealMouseSurfaceActive else {
             prepareForInteraction()
@@ -126,16 +119,24 @@ final class XRSwiftUIHost<Content: View> {
         ]
         window.level = .screenSaver
 
-        // Window alpha affects desktop compositing, not cacheDisplay() of the
-        // hosted view. Keep it non-zero so AppKit continues treating the window
-        // as a normal interactive surface while making it visually negligible.
+        // Keep a non-zero alpha so AppKit treats the window as a live interactive
+        // surface. cacheDisplay() rasterizes the hosting view independently.
         window.alphaValue = 0.001
         window.setFrame(desktopFrame, display: false)
 
-        // NSWindow sizes its content view to the desktop-sized content rect. By
-        // restoring the original logical bounds we let AppKit perform the useful
-        // coordinate transform for us: real desktop cursor coordinates map
-        // directly into the panel's 0...pointSize SwiftUI coordinate system.
+        // Crucially, do not stretch NSHostingView to the desktop and then alter
+        // its bounds. SwiftUI does not behave like a simple affine canvas under
+        // that transformation. Keep it exactly panel-sized and put it around the
+        // current real cursor instead.
+        let mouseInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let bounds = containerView.bounds
+        let maxX = max(bounds.minX, bounds.maxX - pointSize.width)
+        let maxY = max(bounds.minY, bounds.maxY - pointSize.height)
+        let origin = NSPoint(
+            x: min(max(mouseInWindow.x - pointSize.width / 2, bounds.minX), maxX),
+            y: min(max(mouseInWindow.y - pointSize.height / 2, bounds.minY), maxY)
+        )
+        hostingView.frame = NSRect(origin: origin, size: pointSize)
         hostingView.bounds = NSRect(origin: .zero, size: pointSize)
 
         window.orderFrontRegardless()
@@ -147,6 +148,9 @@ final class XRSwiftUIHost<Content: View> {
         guard isRealMouseSurfaceActive else { return }
         isRealMouseSurfaceActive = false
 
+        hostingView.frame = NSRect(origin: .zero, size: pointSize)
+        hostingView.bounds = NSRect(origin: .zero, size: pointSize)
+
         window.alphaValue = 1
         window.level = .normal
         window.collectionBehavior = []
@@ -154,20 +158,36 @@ final class XRSwiftUIHost<Content: View> {
             NSRect(origin: NSPoint(x: -20_000, y: -20_000), size: pointSize),
             display: false
         )
-        hostingView.bounds = NSRect(origin: .zero, size: pointSize)
         window.orderFront(nil)
     }
 
     /// Current real macOS cursor position expressed in SwiftXR's normalized
-    /// top-left panel coordinates. Because the hosting view spans the desktop in
-    /// frame coordinates, this is the same mapping AppKit uses for control hit
-    /// testing and hover.
+    /// top-left panel coordinates. If the pointer leaves the native-size child
+    /// view, move the associated system cursor back to its nearest edge. We do
+    /// not manufacture or retarget NSEvents: events within the panel are the
+    /// ordinary AppKit events generated by the physical mouse/trackpad.
     func realMousePointerPosition() -> SIMD2<Float>? {
         guard isRealMouseSurfaceActive else { return nil }
 
         let pointInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-        let pointInHost = hostingView.convert(pointInWindow, from: nil)
+        let panelFrame = hostingView.frame
+        let inset: CGFloat = 0.5
+        let clamped = NSPoint(
+            x: min(max(pointInWindow.x, panelFrame.minX + inset), panelFrame.maxX - inset),
+            y: min(max(pointInWindow.y, panelFrame.minY + inset), panelFrame.maxY - inset)
+        )
 
+        if abs(clamped.x - pointInWindow.x) > 0.001 ||
+            abs(clamped.y - pointInWindow.y) > 0.001,
+           let cgLocation = CGEvent(source: nil)?.location {
+            let dx = clamped.x - pointInWindow.x
+            let dy = clamped.y - pointInWindow.y
+            CGWarpMouseCursorPosition(
+                CGPoint(x: cgLocation.x + dx, y: cgLocation.y - dy)
+            )
+        }
+
+        let pointInHost = hostingView.convert(clamped, from: nil)
         let width = max(hostingView.bounds.width, 1)
         let height = max(hostingView.bounds.height, 1)
 
