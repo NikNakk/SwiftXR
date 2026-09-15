@@ -45,9 +45,14 @@ private final class XRPointerCaptureView: NSView {
 /// Hosted SwiftUI panels translate the resulting `XRPanelInteraction` events
 /// into a second, synthetic AppKit event stream addressed to their off-screen
 /// NSHostingView window. Because polling is performed by the application's XR
-/// frame callback, no custom `NSApplication` subclass is required. The frame
-/// callback should continue running in AppKit's event-tracking run-loop mode so
-/// Slider and other nested tracking loops still receive synthetic drag/up events.
+/// frame callback, the visible/semantic pointer does not depend on ordinary
+/// physical AppKit mouse dispatch.
+///
+/// When the process uses `XRMacApplication`, physical mouse events belonging to
+/// SwiftXR's invisible capture windows are filtered from `nextEvent(...)`. This
+/// prevents native controls with nested tracking loops (notably Slider) from
+/// seeing both the real capture-window drag and SwiftXR's synthetic host-window
+/// drag at the same time.
 @MainActor
 public final class XRMacPointerCapture: NSObject {
     public let interaction: XRPanelInteraction
@@ -64,6 +69,9 @@ public final class XRMacPointerCapture: NSObject {
     private var savedCursorPosition: CGPoint?
     private var cursorHidden = false
     private var previousPressedMouseButtons = 0
+
+    private weak var filteredApplication: XRMacApplication?
+    private var previousEventTransformer: XRMacApplication.EventTransformer?
 
     public init(
         interaction: XRPanelInteraction,
@@ -196,11 +204,13 @@ public final class XRMacPointerCapture: NSObject {
         savedCursorPosition = CGEvent(source: nil)?.location
         previousPressedMouseButtons = NSEvent.pressedMouseButtons
         createCaptureWindows()
+        installPhysicalEventFilter()
         installAuxiliaryEventMonitor()
 
         let result = CGAssociateMouseAndMouseCursorPosition(0)
         guard result == .success else {
             uninstallAuxiliaryEventMonitor()
+            uninstallPhysicalEventFilter()
             destroyCaptureWindows()
             throw XRMacPointerCaptureError.mouseCursorDisassociationFailed(result)
         }
@@ -208,6 +218,57 @@ public final class XRMacPointerCapture: NSObject {
         NSCursor.hide()
         cursorHidden = true
         isCaptured = true
+    }
+
+    // MARK: - Physical event filtering
+
+    /// Filter the actual capture-window mouse stream before AppKit controls can
+    /// consume it. The virtual pointer still comes from CGGetLastMouseDelta()
+    /// and NSEvent.pressedMouseButtons; only the competing physical NSEvents are
+    /// removed from dispatch.
+    private func installPhysicalEventFilter() {
+        guard filteredApplication == nil else { return }
+        guard let application = NSApplication.shared as? XRMacApplication else {
+            return
+        }
+
+        filteredApplication = application
+        previousEventTransformer = application.swiftXREventTransformer
+        let previous = previousEventTransformer
+
+        application.swiftXREventTransformer = { [weak self] event in
+            guard let self else {
+                return previous?(event) ?? event
+            }
+
+            let shouldConsume: Bool = MainActor.assumeIsolated {
+                guard self.isCaptureWindowEvent(event) else { return false }
+
+                switch event.type {
+                case .mouseMoved,
+                     .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+                     .leftMouseDown, .leftMouseUp,
+                     .rightMouseDown, .rightMouseUp,
+                     .otherMouseDown, .otherMouseUp:
+                    return true
+                default:
+                    return false
+                }
+            }
+
+            if shouldConsume {
+                return nil
+            }
+            return previous?(event) ?? event
+        }
+    }
+
+    private func uninstallPhysicalEventFilter() {
+        if let application = filteredApplication {
+            application.swiftXREventTransformer = previousEventTransformer
+        }
+        filteredApplication = nil
+        previousEventTransformer = nil
     }
 
     // MARK: - Scroll / keyboard events
@@ -314,6 +375,7 @@ public final class XRMacPointerCapture: NSObject {
 
     private func releasePhysicalCapture(restoreCursor: Bool) {
         uninstallAuxiliaryEventMonitor()
+        uninstallPhysicalEventFilter()
 
         if isCaptured || cursorHidden || !captureWindows.isEmpty {
             _ = CGAssociateMouseAndMouseCursorPosition(1)
