@@ -9,6 +9,7 @@ enum VideoControlCommand {
     case setVolume(Float)
     case recenter
     case setProjection(VideoProjectionMode)
+    case setStereoLayout(VideoStereoLayout)
     case showFiles
     case showYouTube
 }
@@ -21,14 +22,20 @@ final class VideoControlsModel: ObservableObject {
     @Published var duration: Double = 0
     @Published var volume: Double = 1
     @Published var projectionMode: VideoProjectionMode
+    @Published var stereoLayout: VideoStereoLayout
     @Published var spatialAudioEnabled = false
     @Published var isScrubbing = false
 
     var commandHandler: ((VideoControlCommand) -> Void)?
 
-    init(title: String, projectionMode: VideoProjectionMode) {
+    init(
+        title: String,
+        projectionMode: VideoProjectionMode,
+        stereoLayout: VideoStereoLayout = .mono
+    ) {
         self.title = title
         self.projectionMode = projectionMode
+        self.stereoLayout = stereoLayout
     }
 
     func update(
@@ -37,6 +44,7 @@ final class VideoControlsModel: ObservableObject {
         duration: Double,
         volume: Float,
         projectionMode: VideoProjectionMode,
+        stereoLayout: VideoStereoLayout,
         spatialAudioEnabled: Bool
     ) -> Bool {
         var changed = false
@@ -60,6 +68,10 @@ final class VideoControlsModel: ObservableObject {
         }
         if self.projectionMode != projectionMode {
             self.projectionMode = projectionMode
+            changed = true
+        }
+        if self.stereoLayout != stereoLayout {
+            self.stereoLayout = stereoLayout
             changed = true
         }
         if self.spatialAudioEnabled != spatialAudioEnabled {
@@ -110,6 +122,8 @@ struct VideoControlsView: View {
                             .lineLimit(1)
                         HStack(spacing: 8) {
                             Text(model.projectionMode.description)
+                            Text("•")
+                            Text(model.stereoLayout.description)
                             if model.spatialAudioEnabled {
                                 Label("Spatial", systemImage: "spatialaudio")
                             }
@@ -189,17 +203,32 @@ struct VideoControlsView: View {
                 .buttonStyle(.bordered)
 
                 HStack(spacing: 8) {
+                    Text("Projection")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .frame(width: 72, alignment: .leading)
                     projectionButton("Flat", .flat)
                     projectionButton("VR180", .vr180Equirect)
                     projectionButton("Fisheye", .vr180Fisheye)
                     projectionButton("EAC360", .eac360)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Stereo")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .frame(width: 72, alignment: .leading)
+                    stereoButton(.mono)
+                    stereoButton(.sideBySide)
+                    stereoButton(.topBottom)
+                    Spacer()
                 }
             }
             .foregroundStyle(.white)
             .controlSize(.regular)
             .padding(22)
         }
-        .frame(width: 760, height: 270)
+        .frame(width: 820, height: 325)
         .padding(6)
     }
 
@@ -217,6 +246,22 @@ struct VideoControlsView: View {
             Button(title) {
                 model.projectionMode = mode
                 model.send(.setProjection(mode))
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    @ViewBuilder
+    private func stereoButton(_ layout: VideoStereoLayout) -> some View {
+        if model.stereoLayout == layout {
+            Button(layout.shortLabel) {
+                model.send(.setStereoLayout(layout))
+            }
+            .buttonStyle(.borderedProminent)
+        } else {
+            Button(layout.shortLabel) {
+                model.stereoLayout = layout
+                model.send(.setStereoLayout(layout))
             }
             .buttonStyle(.bordered)
         }
