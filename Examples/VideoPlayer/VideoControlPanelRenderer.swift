@@ -9,7 +9,43 @@ private struct VideoControlPanelVertex {
 
 private struct VideoControlPanelUniforms {
     var viewProjection: simd_float4x4
+    var model: simd_float4x4
     var pointer: SIMD4<Float>
+}
+
+private struct VideoControlPanelAnchor {
+    var headPosition: SIMD3<Float>
+    var right: SIMD3<Float>
+    var up: SIMD3<Float>
+    var forward: SIMD3<Float>
+
+    static func from(frame: XRFrame) -> VideoControlPanelAnchor? {
+        guard frame.views.count >= 2 else { return nil }
+        let left = frame.views[0]
+        let rightView = frame.views[1]
+        let q = simd_quatf(
+            ix: left.pose.orientation.x,
+            iy: left.pose.orientation.y,
+            iz: left.pose.orientation.z,
+            r: left.pose.orientation.w
+        )
+        let leftPosition = SIMD3<Float>(
+            left.pose.position.x,
+            left.pose.position.y,
+            left.pose.position.z
+        )
+        let rightPosition = SIMD3<Float>(
+            rightView.pose.position.x,
+            rightView.pose.position.y,
+            rightView.pose.position.z
+        )
+        return VideoControlPanelAnchor(
+            headPosition: (leftPosition + rightPosition) * 0.5,
+            right: simd_normalize(q.act(SIMD3<Float>(1, 0, 0))),
+            up: simd_normalize(q.act(SIMD3<Float>(0, 1, 0))),
+            forward: simd_normalize(q.act(SIMD3<Float>(0, 0, -1)))
+        )
+    }
 }
 
 enum VideoControlPanelRendererError: Error {
@@ -22,14 +58,12 @@ final class VideoControlPanelRenderer {
     private let vertexBuffer: any MTLBuffer
     private let vertexCount: Int
     private let textureAspect: Float
+    private var anchor: VideoControlPanelAnchor?
 
     init(
         device: any MTLDevice,
         swapchain: XRSwapchain,
-        panelTexture: any MTLTexture,
-        worldWidth: Float = 1.62,
-        distance: Float = 1.45,
-        verticalOffset: Float = -0.18
+        panelTexture: any MTLTexture
     ) throws {
         textureAspect = Float(panelTexture.width) / Float(max(panelTexture.height, 1))
 
@@ -48,19 +82,16 @@ final class VideoControlPanelRenderer {
         descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
 
-        let aspectHeightOverWidth = Float(panelTexture.height) / Float(max(panelTexture.width, 1))
-        let halfWidth = worldWidth * 0.5
-        let halfHeight = worldWidth * aspectHeightOverWidth * 0.5
-        let z = -distance
-        let y = verticalOffset
-
+        // Unit quad. Width/height/orientation/position are supplied per frame so
+        // different UI modes can use different angular sizes and recentering can
+        // genuinely move the panel in world space.
         let vertices: [VideoControlPanelVertex] = [
-            .init(position: SIMD3(-halfWidth, y + halfHeight, z), uv: SIMD2(0, 0)),
-            .init(position: SIMD3(-halfWidth, y - halfHeight, z), uv: SIMD2(0, 1)),
-            .init(position: SIMD3( halfWidth, y - halfHeight, z), uv: SIMD2(1, 1)),
-            .init(position: SIMD3(-halfWidth, y + halfHeight, z), uv: SIMD2(0, 0)),
-            .init(position: SIMD3( halfWidth, y - halfHeight, z), uv: SIMD2(1, 1)),
-            .init(position: SIMD3( halfWidth, y + halfHeight, z), uv: SIMD2(1, 0)),
+            .init(position: SIMD3(-0.5,  0.5, 0), uv: SIMD2(0, 0)),
+            .init(position: SIMD3(-0.5, -0.5, 0), uv: SIMD2(0, 1)),
+            .init(position: SIMD3( 0.5, -0.5, 0), uv: SIMD2(1, 1)),
+            .init(position: SIMD3(-0.5,  0.5, 0), uv: SIMD2(0, 0)),
+            .init(position: SIMD3( 0.5, -0.5, 0), uv: SIMD2(1, 1)),
+            .init(position: SIMD3( 0.5,  0.5, 0), uv: SIMD2(1, 0)),
         ]
         vertexCount = vertices.count
 
@@ -79,15 +110,40 @@ final class VideoControlPanelRenderer {
         vertexBuffer = buffer
     }
 
+    func recenter() {
+        anchor = nil
+    }
+
     func encode(
         frame: XRFrame,
         swapchainTexture: any MTLTexture,
         panelTexture: any MTLTexture,
         pointerPosition: SIMD2<Float>?,
         commandBuffer: any MTLCommandBuffer,
-        clearBeforePanel: Bool = false
+        clearBeforePanel: Bool = false,
+        worldWidth: Float = 2.0,
+        distance: Float = 1.50,
+        verticalOffset: Float = -0.12
     ) throws {
         guard frame.views.count >= 2 else { return }
+
+        if anchor == nil,
+           frame.trackingState.orientationValid,
+           frame.trackingState.positionValid {
+            anchor = VideoControlPanelAnchor.from(frame: frame)
+        }
+        guard let anchor else { return }
+
+        let worldHeight = worldWidth / max(textureAspect, 0.001)
+        let center = anchor.headPosition
+            + anchor.forward * distance
+            + anchor.up * verticalOffset
+        let model = simd_float4x4(columns: (
+            SIMD4(anchor.right * worldWidth, 0),
+            SIMD4(anchor.up * worldHeight, 0),
+            SIMD4(-anchor.forward, 0),
+            SIMD4(center, 1)
+        ))
 
         for eye in 0..<2 {
             let pass = MTLRenderPassDescriptor()
@@ -113,6 +169,7 @@ final class VideoControlPanelRenderer {
             let pointer = pointerPosition ?? .zero
             var uniforms = VideoControlPanelUniforms(
                 viewProjection: frame.views[eye].viewProjectionMatrix(nearZ: 0.05, farZ: 20),
+                model: model,
                 pointer: SIMD4(
                     pointer.x,
                     pointer.y,
@@ -151,6 +208,7 @@ final class VideoControlPanelRenderer {
 
     struct VideoControlPanelUniforms {
         float4x4 viewProjection;
+        float4x4 model;
         float4 pointer;
     };
 
@@ -166,7 +224,7 @@ final class VideoControlPanelRenderer {
     {
         PanelOut out;
         const VideoControlPanelVertex input = vertices[vertexID];
-        out.position = uniforms.viewProjection * float4(input.position, 1.0);
+        out.position = uniforms.viewProjection * uniforms.model * float4(input.position, 1.0);
         out.uv = input.uv;
         return out;
     }
