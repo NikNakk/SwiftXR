@@ -56,14 +56,18 @@ public final class XRPanelInteraction {
     /// the panel. SwiftXR maintains this for relative mouse-style input.
     public private(set) var pointerPosition: SIMD2<Float>?
 
-    /// Called after SwiftXR has applied any built-in pointer-state bookkeeping.
-    /// The current display-only SwiftUI bridge uses this hook for application
-    /// model/focus handling; a future hosted interactive SwiftUI bridge can
-    /// consume the same events internally.
+    /// Optional application observer called after SwiftXR has dispatched the
+    /// event to the panel's hosted UI surface.
     public var handler: Handler?
+
+    private var internalHandler: Handler?
 
     public init(handler: Handler? = nil) {
         self.handler = handler
+    }
+
+    func setInternalHandler(_ handler: Handler?) {
+        internalHandler = handler
     }
 
     public func send(_ event: XRPanelInteractionEvent) {
@@ -83,6 +87,7 @@ public final class XRPanelInteraction {
             break
         }
 
+        internalHandler?(event)
         handler?(event)
     }
 
