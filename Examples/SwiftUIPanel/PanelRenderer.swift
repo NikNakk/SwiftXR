@@ -15,7 +15,7 @@ private struct PanelUniforms {
 final class PanelRenderer {
     private let pipeline: any MTLRenderPipelineState
     private let vertexBuffer: any MTLBuffer
-    private let panelTexture: any MTLTexture
+    var panelTexture: any MTLTexture
     private let vertexCount: Int
 
     var pointerPosition: SIMD2<Float>?
