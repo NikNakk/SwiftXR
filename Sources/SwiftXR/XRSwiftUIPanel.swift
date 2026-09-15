@@ -72,20 +72,6 @@ public final class XRSwiftUIPanel<Content: View> {
         self.host = host
         self.texture = texture
 
-        host.setSyntheticEventDispatchHandler { [weak self] in
-            guard let self else { return }
-
-            // Queued synthetic mouse events are delivered here only after
-            // NSWindow/SwiftUI have processed the actual press/drag/release.
-            // Refresh then so Button actions and Slider/Toggle state changes are
-            // reflected in the Metal texture rather than racing ahead of AppKit.
-            try? self.refresh()
-
-            DispatchQueue.main.async { [weak self] in
-                try? self?.refresh()
-            }
-        }
-
         interaction.setInternalHandler { [weak self, weak interaction] event in
             guard let self, let interaction else { return }
 
@@ -94,18 +80,14 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            switch event {
-            case .pointerMoved, .pointerMovedBy, .pointerDown, .pointerUp:
-                // These are queued through NSApplication and refresh from the
-                // hosting window's post-dispatch callback above.
-                break
+            // Toggle/Slider updates and accessibility Button presses are all
+            // dispatched synchronously by XRSwiftUIHost. Refresh immediately,
+            // then once more on the next main-loop turn for deferred SwiftUI
+            // state propagation.
+            try? self.refresh()
 
-            case .navigate, .select, .back, .pointerExited, .scroll:
-                // Keyboard/scroll semantic events are dispatched synchronously.
-                try? self.refresh()
-                DispatchQueue.main.async { [weak self] in
-                    try? self?.refresh()
-                }
+            DispatchQueue.main.async { [weak self] in
+                try? self?.refresh()
             }
         }
     }
