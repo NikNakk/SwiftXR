@@ -119,6 +119,11 @@ final class PanelRenderer {
                 length: MemoryLayout<PanelUniforms>.stride,
                 index: 1
             )
+            encoder.setFragmentBytes(
+                &uniforms,
+                length: MemoryLayout<PanelUniforms>.stride,
+                index: 1
+            )
             encoder.setFragmentTexture(panelTexture, index: 0)
             encoder.drawPrimitives(
                 type: .triangle,
