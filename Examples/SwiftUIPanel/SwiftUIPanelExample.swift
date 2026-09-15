@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import GameController
 import SwiftUI
@@ -107,48 +108,62 @@ private func configure(
     onPress(pad.buttonMenu) { panel.interaction.select() }
 }
 
+/// Adapter for the ordinary macOS cursor/trackpad.
+///
+/// `GCMouse` does not reliably represent the normal desktop pointer in this
+/// command-line-style example, so poll AppKit's global cursor location and mouse
+/// button state once per XR frame and translate changes into panel interaction.
 @MainActor
-private func configure(
-    mouse: GCMouse,
-    panel: XRSwiftUIPanel<SwiftXRCard>
-) {
-    guard let input = mouse.mouseInput else { return }
+private final class DesktopMouseAdapter {
+    private let interaction: XRPanelInteraction
+    private var lastLocation: NSPoint?
+    private var leftWasDown = false
+    private var rightWasDown = false
 
-    panel.interaction.movePointer(to: SIMD2(0.5, 0.5))
-
-    input.mouseMovedHandler = { _, deltaX, deltaY in
-        DispatchQueue.main.async {
-            panel.interaction.movePointer(
-                by: SIMD2(
-                    Float(deltaX) / 700.0,
-                    Float(-deltaY) / 500.0
-                )
-            )
-        }
+    init(interaction: XRPanelInteraction) {
+        self.interaction = interaction
+        interaction.movePointer(to: SIMD2(0.5, 0.5))
     }
 
-    input.leftButton.pressedChangedHandler = { _, _, pressed in
-        DispatchQueue.main.async {
-            if pressed {
-                panel.interaction.pointerDown()
-            } else {
-                panel.interaction.pointerUp()
+    func update() {
+        let location = NSEvent.mouseLocation
+
+        if let lastLocation {
+            let dx = Float(location.x - lastLocation.x)
+            let dy = Float(location.y - lastLocation.y)
+
+            if dx != 0 || dy != 0 {
+                interaction.movePointer(
+                    by: SIMD2(
+                        dx / 700.0,
+                        -dy / 500.0
+                    )
+                )
             }
         }
-    }
 
-    input.rightButton?.pressedChangedHandler = { _, _, pressed in
-        guard pressed else { return }
-        DispatchQueue.main.async {
-            panel.interaction.back()
+        self.lastLocation = location
+
+        let buttons = NSEvent.pressedMouseButtons
+        let leftIsDown = (buttons & (1 << 0)) != 0
+        let rightIsDown = (buttons & (1 << 1)) != 0
+
+        if leftIsDown != leftWasDown {
+            if leftIsDown {
+                interaction.pointerDown(.primary)
+            } else {
+                interaction.pointerUp(.primary)
+            }
+            leftWasDown = leftIsDown
         }
-    }
 
-    input.scroll.valueChangedHandler = { _, xValue, yValue in
-        DispatchQueue.main.async {
-            panel.interaction.scroll(
-                SIMD2(Float(xValue), Float(yValue)) / 8.0
-            )
+        if rightIsDown != rightWasDown {
+            if rightIsDown {
+                interaction.pointerDown(.secondary)
+            } else {
+                interaction.pointerUp(.secondary)
+            }
+            rightWasDown = rightIsDown
         }
     }
 }
@@ -178,8 +193,8 @@ struct SwiftUIPanelExample {
             panelTexture: panel.texture
         )
 
+        let desktopMouse = DesktopMouseAdapter(interaction: panel.interaction)
         var configuredController: GCController?
-        var configuredMouse: GCMouse?
 
         while !session.isRunning && !session.shouldExit {
             try session.pollEvents()
@@ -199,14 +214,7 @@ struct SwiftUIPanelExample {
                 }
             }
 
-            let mouse = GCMouse.current ?? GCMouse.mice().first
-            if mouse !== configuredMouse {
-                configuredMouse = mouse
-                if let mouse {
-                    configure(mouse: mouse, panel: panel)
-                }
-            }
-
+            desktopMouse.update()
             renderer.pointerPosition = panel.interaction.pointerPosition
 
             try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
@@ -218,8 +226,8 @@ struct SwiftUIPanelExample {
             }
 
             // This is a command-line demo rather than a normal NSApplication run
-            // loop, so explicitly allow queued SwiftUI/GameController callbacks to
-            // run briefly between XR frames.
+            // loop, so explicitly allow queued SwiftUI/AppKit callbacks to run
+            // briefly between XR frames.
             RunLoop.current.run(until: Date().addingTimeInterval(0.001))
             frames += 1
         }
