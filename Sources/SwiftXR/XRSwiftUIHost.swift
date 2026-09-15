@@ -7,13 +7,30 @@ private final class XRSwiftUIHostingWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+/// A desktop-sized view that explicitly owns mouse hit-testing while the real
+/// macOS pointer is being used to drive an XR SwiftUI panel. The view is
+/// visually transparent, but it must not allow clicks to reach Finder, Safari,
+/// or another application underneath the SwiftXR capture surface.
+private final class XRMouseCaptureContainerView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+        return super.hitTest(point) ?? self
+    }
+}
+
 @MainActor
 final class XRSwiftUIHost<Content: View> {
     let pointSize: CGSize
     let scale: CGFloat
 
     private let window: XRSwiftUIHostingWindow
-    private let containerView: NSView
+    private let containerView: XRMouseCaptureContainerView
     private let hostingView: NSHostingView<Content>
 
     // Device-neutral semantic-pointer state. The real macOS mouse path bypasses
@@ -39,8 +56,10 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.autoresizingMask = []
         hostingView.wantsLayer = true
 
-        let containerView = NSView(frame: frame)
+        let containerView = XRMouseCaptureContainerView(frame: frame)
         containerView.autoresizingMask = [.width, .height]
+        containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = NSColor.clear.cgColor
         containerView.addSubview(hostingView)
 
         let window = XRSwiftUIHostingWindow(
@@ -90,10 +109,11 @@ final class XRSwiftUIHost<Content: View> {
 
     // MARK: - Real macOS mouse surface
 
-    /// Put the real hosted SwiftUI hierarchy inside an effectively invisible
-    /// desktop-sized interaction window without scaling the hosting view itself.
-    /// AppKit therefore delivers genuine mouse/trackpad events using the same
-    /// coordinates SwiftUI uses for layout and rasterization.
+    /// Put the real hosted SwiftUI hierarchy inside an invisible desktop-sized
+    /// interaction window without scaling the hosting view itself. The window
+    /// owns the whole desktop for hit-testing, while the native-size child view
+    /// receives ordinary AppKit events whenever the hidden real pointer is over
+    /// the panel.
     func beginRealMouseCaptureSurface() {
         guard !isRealMouseSurfaceActive else {
             prepareForInteraction()
@@ -119,15 +139,16 @@ final class XRSwiftUIHost<Content: View> {
         ]
         window.level = .screenSaver
 
-        // Keep a non-zero alpha so AppKit treats the window as a live interactive
-        // surface. cacheDisplay() rasterizes the hosting view independently.
-        window.alphaValue = 0.001
+        // Keep the NSWindow itself fully present in the window server. The
+        // content remains visually transparent, but we do not use a tiny
+        // window-level alpha because that can make pointer ownership ambiguous.
+        window.alphaValue = 1
+        window.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.0001)
         window.setFrame(desktopFrame, display: false)
 
         // Crucially, do not stretch NSHostingView to the desktop and then alter
-        // its bounds. SwiftUI does not behave like a simple affine canvas under
-        // that transformation. Keep it exactly panel-sized and put it around the
-        // current real cursor instead.
+        // its bounds. Keep it exactly panel-sized and put it around the current
+        // real cursor instead.
         let mouseInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
         let bounds = containerView.bounds
         let maxX = max(bounds.minX, bounds.maxX - pointSize.width)
@@ -140,7 +161,7 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.bounds = NSRect(origin: .zero, size: pointSize)
 
         window.orderFrontRegardless()
-        window.makeKey()
+        window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(hostingView)
     }
 
@@ -151,6 +172,7 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.frame = NSRect(origin: .zero, size: pointSize)
         hostingView.bounds = NSRect(origin: .zero, size: pointSize)
 
+        window.backgroundColor = .clear
         window.alphaValue = 1
         window.level = .normal
         window.collectionBehavior = []
@@ -171,7 +193,7 @@ final class XRSwiftUIHost<Content: View> {
 
         let pointInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
         let panelFrame = hostingView.frame
-        let inset: CGFloat = 0.5
+        let inset: CGFloat = 1
         let clamped = NSPoint(
             x: min(max(pointInWindow.x, panelFrame.minX + inset), panelFrame.maxX - inset),
             y: min(max(pointInWindow.y, panelFrame.minY + inset), panelFrame.maxY - inset)
