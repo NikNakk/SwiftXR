@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Metal
 import SwiftXR
@@ -94,7 +95,7 @@ struct VirtualDesktopExample {
                 print("First desktop frame received")
                 return
             }
-            try await Task.sleep(nanoseconds: 10_000_000)
+            try await Task<Never, Never>.sleep(nanoseconds: 10_000_000)
         }
 
         throw NSError(
@@ -119,7 +120,7 @@ struct VirtualDesktopExample {
             }
 
             if !session.isRunning && !session.shouldExit {
-                try await Task.sleep(nanoseconds: 10_000_000)
+                try await Task<Never, Never>.sleep(nanoseconds: 10_000_000)
             }
         }
     }
@@ -179,7 +180,7 @@ struct VirtualDesktopExample {
             let deadline = Date().addingTimeInterval(5)
             while !session.shouldExit && Date() < deadline {
                 _ = try session.pollEvents()
-                usleep(10_000)
+                Thread.sleep(forTimeInterval: 0.01)
             }
         }
     }
