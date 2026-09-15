@@ -121,6 +121,9 @@ final class XRSwiftUIHost<Content: View> {
     }
 
     private func prepareForInteraction() {
+        // SwiftUI controls expect a normal key-window responder environment.
+        // The window remains physically off-screen, but making it key lets
+        // AppKit/NSHostingView perform ordinary hit testing and tracking.
         if !window.isKeyWindow {
             window.makeKey()
         }
@@ -151,20 +154,16 @@ final class XRSwiftUIHost<Content: View> {
             windowNumber: window.windowNumber,
             context: nil,
             eventNumber: 0,
-            clickCount: 0,
+            clickCount: pressedButtons.isEmpty ? 0 : 1,
             pressure: pressedButtons.isEmpty ? 0 : 1
         ) else {
             return
         }
 
-        switch type {
-        case .leftMouseDragged:
-            hostingView.mouseDragged(with: event)
-        case .rightMouseDragged:
-            hostingView.rightMouseDragged(with: event)
-        default:
-            hostingView.mouseMoved(with: event)
-        }
+        // Use normal NSWindow dispatch. This is important for controls that use
+        // AppKit's tracking/hit-testing machinery (notably Button and Slider),
+        // rather than only the simpler direct NSHostingView tap path.
+        window.sendEvent(event)
     }
 
     private func sendPointerButton(
@@ -198,18 +197,7 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        switch type {
-        case .leftMouseDown:
-            hostingView.mouseDown(with: event)
-        case .leftMouseUp:
-            hostingView.mouseUp(with: event)
-        case .rightMouseDown:
-            hostingView.rightMouseDown(with: event)
-        case .rightMouseUp:
-            hostingView.rightMouseUp(with: event)
-        default:
-            break
-        }
+        window.sendEvent(event)
     }
 
     private func sendScroll(
@@ -241,7 +229,7 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        hostingView.scrollWheel(with: event)
+        window.sendEvent(event)
     }
 
     private func sendKey(
@@ -282,8 +270,8 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        hostingView.keyDown(with: down)
-        hostingView.keyUp(with: up)
+        window.sendEvent(down)
+        window.sendEvent(up)
     }
 
     private func windowPoint(for normalizedPosition: SIMD2<Float>) -> NSPoint {
