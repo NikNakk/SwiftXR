@@ -56,41 +56,69 @@ private struct VideoVertex {
     var uv: SIMD2<Float>
 }
 
-private struct VideoUniforms {
+private struct FlatVideoUniforms {
     var viewProjection: simd_float4x4
+}
+
+private struct ImmersiveVideoUniforms {
+    var viewOrientation: SIMD4<Float>
+    // tan(left), tan(right), tan(down), tan(up)
+    var fovTangents: SIMD4<Float>
+    var anchorRight: SIMD4<Float>
+    var anchorUp: SIMD4<Float>
+    var anchorForward: SIMD4<Float>
+    // eye index, projection mode, texture width, texture height
+    var parameters: SIMD4<Float>
 }
 
 final class VideoRenderer {
     let geometry: VideoSurfaceGeometry
+    let projectionMode: VideoProjectionMode
 
-    private let pipelineState: any MTLRenderPipelineState
+    private let flatPipelineState: any MTLRenderPipelineState
+    private let immersivePipelineState: any MTLRenderPipelineState
     private let samplerState: any MTLSamplerState
     private let vertexBuffer: any MTLBuffer
+    private var anchor: VideoProjectionAnchor?
 
     init(
         device: any MTLDevice,
         swapchain: XRSwapchain,
-        displaySize: CGSize
+        displaySize: CGSize,
+        projectionMode: VideoProjectionMode
     ) throws {
         self.geometry = VideoSurfaceGeometry(displaySize: displaySize)
+        self.projectionMode = projectionMode
 
         let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
-        guard let vertexFunction = library.makeFunction(name: "video_vertex") else {
-            throw VideoRendererError.shaderFunctionMissing("video_vertex")
+        guard let flatVertex = library.makeFunction(name: "flat_video_vertex") else {
+            throw VideoRendererError.shaderFunctionMissing("flat_video_vertex")
         }
-        guard let fragmentFunction = library.makeFunction(name: "video_fragment") else {
-            throw VideoRendererError.shaderFunctionMissing("video_fragment")
+        guard let flatFragment = library.makeFunction(name: "flat_video_fragment") else {
+            throw VideoRendererError.shaderFunctionMissing("flat_video_fragment")
+        }
+        guard let immersiveVertex = library.makeFunction(name: "immersive_video_vertex") else {
+            throw VideoRendererError.shaderFunctionMissing("immersive_video_vertex")
+        }
+        guard let immersiveFragment = library.makeFunction(name: "immersive_video_fragment") else {
+            throw VideoRendererError.shaderFunctionMissing("immersive_video_fragment")
         }
 
-        let pipelineDescriptor = MTLRenderPipelineDescriptor()
-        pipelineDescriptor.label = "SwiftXR video pipeline"
-        pipelineDescriptor.vertexFunction = vertexFunction
-        pipelineDescriptor.fragmentFunction = fragmentFunction
-        pipelineDescriptor.colorAttachments[0].pixelFormat = swapchain.pixelFormat
-        pipelineDescriptor.rasterSampleCount = 1
-        self.pipelineState = try device.makeRenderPipelineState(
-            descriptor: pipelineDescriptor
-        )
+        let flatDescriptor = MTLRenderPipelineDescriptor()
+        flatDescriptor.label = "SwiftXR flat video pipeline"
+        flatDescriptor.vertexFunction = flatVertex
+        flatDescriptor.fragmentFunction = flatFragment
+        flatDescriptor.colorAttachments[0].pixelFormat = swapchain.pixelFormat
+        flatDescriptor.rasterSampleCount = 1
+        self.flatPipelineState = try device.makeRenderPipelineState(descriptor: flatDescriptor)
+
+        let immersiveDescriptor = MTLRenderPipelineDescriptor()
+        immersiveDescriptor.label = "SwiftXR immersive video pipeline"
+        immersiveDescriptor.vertexFunction = immersiveVertex
+        immersiveDescriptor.fragmentFunction = immersiveFragment
+        immersiveDescriptor.colorAttachments[0].pixelFormat = swapchain.pixelFormat
+        immersiveDescriptor.rasterSampleCount = 1
+        self.immersivePipelineState = try device.makeRenderPipelineState(descriptor: immersiveDescriptor)
 
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.label = "SwiftXR video sampler"
@@ -108,22 +136,10 @@ final class VideoRenderer {
         let halfWidth = geometry.widthMeters * 0.5
         let halfHeight = geometry.heightMeters * 0.5
         let vertices = [
-            VideoVertex(
-                position: SIMD3(c.x - halfWidth, c.y + halfHeight, c.z),
-                uv: SIMD2(0, 0)
-            ),
-            VideoVertex(
-                position: SIMD3(c.x - halfWidth, c.y - halfHeight, c.z),
-                uv: SIMD2(0, 1)
-            ),
-            VideoVertex(
-                position: SIMD3(c.x + halfWidth, c.y + halfHeight, c.z),
-                uv: SIMD2(1, 0)
-            ),
-            VideoVertex(
-                position: SIMD3(c.x + halfWidth, c.y - halfHeight, c.z),
-                uv: SIMD2(1, 1)
-            ),
+            VideoVertex(position: SIMD3(c.x - halfWidth, c.y + halfHeight, c.z), uv: SIMD2(0, 0)),
+            VideoVertex(position: SIMD3(c.x - halfWidth, c.y - halfHeight, c.z), uv: SIMD2(0, 1)),
+            VideoVertex(position: SIMD3(c.x + halfWidth, c.y + halfHeight, c.z), uv: SIMD2(1, 0)),
+            VideoVertex(position: SIMD3(c.x + halfWidth, c.y - halfHeight, c.z), uv: SIMD2(1, 1)),
         ]
 
         let buffer = vertices.withUnsafeBufferPointer { pointer -> (any MTLBuffer)? in
@@ -141,6 +157,18 @@ final class VideoRenderer {
         self.vertexBuffer = buffer
     }
 
+    func recenter() {
+        anchor = nil
+    }
+
+    func tilt(yawRadians: Float, pitchRadians: Float) {
+        anchor?.tilt(yawRadians: yawRadians, pitchRadians: pitchRadians)
+    }
+
+    var sceneAnchor: VideoProjectionAnchor? {
+        anchor
+    }
+
     func encode(
         frame: XRFrame,
         swapchainTexture: any MTLTexture,
@@ -148,6 +176,22 @@ final class VideoRenderer {
         commandBuffer: any MTLCommandBuffer
     ) throws {
         guard frame.views.count >= 2 else { return }
+
+        if projectionMode != .flat,
+           anchor == nil,
+           frame.trackingState.orientationValid {
+            anchor = .from(view: frame.views[0])
+            if let anchor {
+                print(
+                    String(
+                        format: "Immersive projection anchored: forward=(%+.3f,%+.3f,%+.3f)",
+                        anchor.forward.x,
+                        anchor.forward.y,
+                        anchor.forward.z
+                    )
+                )
+            }
+        }
 
         for eye in 0..<2 {
             let pass = MTLRenderPassDescriptor()
@@ -157,9 +201,6 @@ final class VideoRenderer {
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].storeAction = .store
             if videoTexture == nil {
-                // Deliberately visible diagnostic: if this colour remains on
-                // screen, OpenXR/Metal presentation works but AVFoundation has
-                // not supplied a decoded frame yet.
                 pass.colorAttachments[0].clearColor = MTLClearColor(
                     red: 0.16,
                     green: 0.0,
@@ -167,23 +208,14 @@ final class VideoRenderer {
                     alpha: 1
                 )
             } else {
-                pass.colorAttachments[0].clearColor = MTLClearColor(
-                    red: 0,
-                    green: 0,
-                    blue: 0,
-                    alpha: 1
-                )
+                pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
             }
 
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: pass
-            ) else {
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
                 throw VideoRendererError.renderEncoderCreationFailed
             }
 
-            encoder.label = eye == 0
-                ? "SwiftXR video left eye"
-                : "SwiftXR video right eye"
+            encoder.label = eye == 0 ? "SwiftXR video left eye" : "SwiftXR video right eye"
             encoder.setViewport(
                 MTLViewport(
                     originX: 0,
@@ -196,45 +228,105 @@ final class VideoRenderer {
             )
 
             if let videoTexture {
-                encoder.setRenderPipelineState(pipelineState)
                 encoder.setCullMode(.none)
-
-                var uniforms = VideoUniforms(
-                    viewProjection: frame.views[eye].viewProjectionMatrix(
-                        nearZ: 0.05,
-                        farZ: 50
-                    )
-                )
-                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-                encoder.setVertexBytes(
-                    &uniforms,
-                    length: MemoryLayout<VideoUniforms>.stride,
-                    index: 1
-                )
                 encoder.setFragmentTexture(videoTexture, index: 0)
                 encoder.setFragmentSamplerState(samplerState, index: 0)
-                encoder.drawPrimitives(
-                    type: .triangleStrip,
-                    vertexStart: 0,
-                    vertexCount: 4
-                )
+
+                if projectionMode == .flat {
+                    try encodeFlat(encoder: encoder, frame: frame, eye: eye)
+                } else if let anchor {
+                    encodeImmersive(
+                        encoder: encoder,
+                        frame: frame,
+                        eye: eye,
+                        texture: videoTexture,
+                        anchor: anchor
+                    )
+                }
             }
 
             encoder.endEncoding()
         }
     }
 
+    private func encodeFlat(
+        encoder: any MTLRenderCommandEncoder,
+        frame: XRFrame,
+        eye: Int
+    ) throws {
+        encoder.setRenderPipelineState(flatPipelineState)
+        var uniforms = FlatVideoUniforms(
+            viewProjection: frame.views[eye].viewProjectionMatrix(nearZ: 0.05, farZ: 50)
+        )
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        encoder.setVertexBytes(
+            &uniforms,
+            length: MemoryLayout<FlatVideoUniforms>.stride,
+            index: 1
+        )
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    private func encodeImmersive(
+        encoder: any MTLRenderCommandEncoder,
+        frame: XRFrame,
+        eye: Int,
+        texture: any MTLTexture,
+        anchor: VideoProjectionAnchor
+    ) {
+        let view = frame.views[eye]
+        let q = view.pose.orientation
+        let fov = view.fov
+
+        encoder.setRenderPipelineState(immersivePipelineState)
+        var uniforms = ImmersiveVideoUniforms(
+            viewOrientation: SIMD4(q.x, q.y, q.z, q.w),
+            fovTangents: SIMD4(
+                tan(fov.angleLeft),
+                tan(fov.angleRight),
+                tan(fov.angleDown),
+                tan(fov.angleUp)
+            ),
+            anchorRight: SIMD4(anchor.right.x, anchor.right.y, anchor.right.z, 0),
+            anchorUp: SIMD4(anchor.up.x, anchor.up.y, anchor.up.z, 0),
+            anchorForward: SIMD4(anchor.forward.x, anchor.forward.y, anchor.forward.z, 0),
+            parameters: SIMD4(
+                Float(eye),
+                Float(projectionMode.rawValue),
+                Float(texture.width),
+                Float(texture.height)
+            )
+        )
+        encoder.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<ImmersiveVideoUniforms>.stride,
+            index: 0
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    }
+
     private static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
+
+    constant float PI = 3.14159265358979323846;
 
     struct VideoVertex {
         float3 position;
         float2 uv;
     };
 
-    struct VideoUniforms {
+    struct FlatVideoUniforms {
         float4x4 viewProjection;
+    };
+
+    struct ImmersiveVideoUniforms {
+        float4 viewOrientation;
+        float4 fovTangents;
+        float4 anchorRight;
+        float4 anchorUp;
+        float4 anchorForward;
+        float4 parameters;
     };
 
     struct VideoVertexOut {
@@ -242,10 +334,15 @@ final class VideoRenderer {
         float2 uv;
     };
 
-    vertex VideoVertexOut video_vertex(
+    struct ImmersiveVertexOut {
+        float4 position [[position]];
+        float2 ndc;
+    };
+
+    vertex VideoVertexOut flat_video_vertex(
         uint vertexID [[vertex_id]],
         const device VideoVertex *vertices [[buffer(0)]],
-        constant VideoUniforms &uniforms [[buffer(1)]])
+        constant FlatVideoUniforms &uniforms [[buffer(1)]])
     {
         VideoVertexOut output;
         VideoVertex input = vertices[vertexID];
@@ -254,12 +351,159 @@ final class VideoRenderer {
         return output;
     }
 
-    fragment float4 video_fragment(
+    fragment float4 flat_video_fragment(
         VideoVertexOut input [[stage_in]],
         texture2d<float> video [[texture(0)]],
         sampler videoSampler [[sampler(0)]])
     {
         return video.sample(videoSampler, input.uv);
+    }
+
+    vertex ImmersiveVertexOut immersive_video_vertex(uint vertexID [[vertex_id]])
+    {
+        const float2 p[3] = {
+            float2(-1.0, -1.0),
+            float2( 3.0, -1.0),
+            float2(-1.0,  3.0)
+        };
+        ImmersiveVertexOut output;
+        output.position = float4(p[vertexID], 0.0, 1.0);
+        output.ndc = p[vertexID];
+        return output;
+    }
+
+    static float3 rotateByQuaternion(float3 v, float4 q)
+    {
+        const float3 qv = q.xyz;
+        return v + 2.0 * cross(qv, cross(qv, v) + q.w * v);
+    }
+
+    // YouTube/FFmpeg Equi-Angular Cubemap, 3x2 layout.
+    // Face packing matches FFmpeg v360 prepare_eac_in():
+    //   top:    LEFT | FRONT | RIGHT
+    //   bottom: DOWN | BACK  | UP
+    static float2 projectEAC(float3 w, uint textureWidth, uint textureHeight)
+    {
+        // SwiftXR/GAV convention is x-right, y-up, -z-forward. Convert to
+        // FFmpeg's x-right, y-down, +z-forward convention first.
+        float3 p = float3(w.x, -w.y, -w.z);
+        float ax = fabs(p.x), ay = fabs(p.y), az = fabs(p.z);
+
+        float uf = 0.0, vf = 0.0;
+        int col = 1, row = 0;
+        int rotation = 0;
+
+        if (ax >= ay && ax >= az) {
+            if (p.x >= 0.0) {
+                uf = -p.z / p.x;
+                vf = p.y / p.x;
+                col = 2; row = 0;
+            } else {
+                uf = -p.z / p.x;
+                vf = -p.y / p.x;
+                col = 0; row = 0;
+            }
+        } else if (ay >= ax && ay >= az) {
+            if (p.y >= 0.0) {
+                uf = p.x / p.y;
+                vf = -p.z / p.y;
+                col = 0; row = 1; rotation = 3;
+            } else {
+                uf = -p.x / p.y;
+                vf = -p.z / p.y;
+                col = 2; row = 1; rotation = 3;
+            }
+        } else {
+            if (p.z >= 0.0) {
+                uf = p.x / p.z;
+                vf = p.y / p.z;
+                col = 1; row = 0;
+            } else {
+                uf = p.x / p.z;
+                vf = -p.y / p.z;
+                col = 1; row = 1; rotation = 1;
+            }
+        }
+
+        if (rotation == 1) {
+            float t = uf; uf = -vf; vf = t;
+        } else if (rotation == 3) {
+            float t = -uf; uf = vf; vf = t;
+        }
+
+        uf = (2.0 / PI) * atan(uf) + 0.5;
+        vf = (2.0 / PI) * atan(vf) + 0.5;
+
+        // Match FFmpeg's two-pixel EAC face padding to avoid seams.
+        const float uPad = 2.0 / float(max(textureWidth, 1u));
+        const float vPad = 2.0 / float(max(textureHeight, 1u));
+        return float2(
+            (uf + float(col)) * (1.0 - 2.0 * uPad) / 3.0 + uPad,
+            vf * (0.5 - 2.0 * vPad) + vPad + 0.5 * float(row)
+        );
+    }
+
+    fragment float4 immersive_video_fragment(
+        ImmersiveVertexOut input [[stage_in]],
+        constant ImmersiveVideoUniforms &uniforms [[buffer(0)]],
+        texture2d<float> video [[texture(0)]],
+        sampler videoSampler [[sampler(0)]])
+    {
+        const float2 unit = (input.ndc + 1.0) * 0.5;
+        const float viewX = mix(uniforms.fovTangents.x, uniforms.fovTangents.y, unit.x);
+        const float viewY = mix(uniforms.fovTangents.z, uniforms.fovTangents.w, unit.y);
+        const float3 viewRay = normalize(float3(viewX, viewY, -1.0));
+        const float3 worldRay = normalize(rotateByQuaternion(viewRay, uniforms.viewOrientation));
+
+        const float localX = dot(worldRay, uniforms.anchorRight.xyz);
+        const float localY = dot(worldRay, uniforms.anchorUp.xyz);
+        const float localForward = dot(worldRay, uniforms.anchorForward.xyz);
+        const int eye = int(uniforms.parameters.x + 0.5);
+        const int projectionMode = int(uniforms.parameters.y + 0.5);
+
+        if (projectionMode == 3) {
+            const float3 gavDirection = float3(localX, localY, -localForward);
+            const float2 uv = projectEAC(
+                gavDirection,
+                uint(uniforms.parameters.z),
+                uint(uniforms.parameters.w)
+            );
+            return video.sample(videoSampler, uv);
+        }
+
+        // Both supported VR180 layouts only contain the forward hemisphere.
+        if (localForward <= 0.0) {
+            return float4(0.0, 0.0, 0.0, 1.0);
+        }
+
+        float2 eyeUV;
+        if (projectionMode == 2) {
+            const float theta = acos(clamp(localForward, -1.0, 1.0));
+            if (theta > PI * 0.5) {
+                return float4(0.0, 0.0, 0.0, 1.0);
+            }
+            const float phi = atan2(localY, localX);
+            const float radius = 0.5 * theta / (PI * 0.5);
+            eyeUV = float2(
+                0.5 + radius * cos(phi),
+                0.5 - radius * sin(phi)
+            );
+        } else {
+            const float longitude = atan2(localX, localForward);
+            const float latitude = asin(clamp(localY, -1.0, 1.0));
+            eyeUV = float2(
+                longitude / PI + 0.5,
+                0.5 - latitude / PI
+            );
+        }
+
+        if (any(eyeUV < 0.0) || any(eyeUV > 1.0)) {
+            return float4(0.0, 0.0, 0.0, 1.0);
+        }
+
+        // SBS: the left OpenXR eye samples the left half and the right eye the right half.
+        const float2 uv = float2((eyeUV.x + float(eye)) * 0.5, eyeUV.y);
+        return video.sample(videoSampler, uv);
     }
     """
 }
