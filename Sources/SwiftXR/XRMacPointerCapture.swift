@@ -22,6 +22,12 @@ private final class XRPointerCaptureWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+/// Event-number marker used by SwiftXR's off-screen SwiftUI host when it posts
+/// synthetic panel mouse events back through NSApplication's normal event queue.
+/// Pointer capture must leave these events alone or it would recursively turn
+/// them back into panel interaction events.
+let swiftXRSyntheticPanelEventNumber = 0x5358_5201
+
 /// Exclusive mouse/trackpad capture for an XR panel on macOS.
 ///
 /// This class deliberately assumes a real AppKit application lifecycle. It does
@@ -232,9 +238,13 @@ public final class XRMacPointerCapture: NSObject {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return event }
 
-            // NSEvent is explicitly non-Sendable. Keep it outside the isolated
-            // result boundary: only the Bool decision crosses out of
-            // `assumeIsolated`, then return the original event here.
+            // These are already panel events produced by XRSwiftUIHost. Leave
+            // them in the normal AppKit event stream so the off-screen hosting
+            // window can perform genuine press/drag/release tracking.
+            if event.eventNumber == swiftXRSyntheticPanelEventNumber {
+                return event
+            }
+
             let shouldConsume: Bool = MainActor.assumeIsolated {
                 guard self.isCaptured else { return false }
                 return self.handle(event)
@@ -251,13 +261,12 @@ public final class XRMacPointerCapture: NSObject {
             let xScale = max(movementScale.x, 1)
             let yScale = max(movementScale.y, 1)
 
-            // With the pointer detached from the system cursor, AppKit reports
-            // deltas in the opposite sense to the top-left panel coordinates we
-            // expose publicly. Normalize them here so physical mouse/trackpad
-            // movement and the virtual XR cursor move in the same direction.
+            // In the current detached-pointer path vertical deltas need mapping
+            // into top-left panel coordinates, while horizontal AppKit deltas
+            // already have the natural left/right sense.
             interaction.movePointer(
                 by: SIMD2(
-                    -Float(event.deltaX) / xScale,
+                    Float(event.deltaX) / xScale,
                     Float(event.deltaY) / yScale
                 )
             )
