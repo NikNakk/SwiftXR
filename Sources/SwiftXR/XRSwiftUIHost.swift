@@ -38,6 +38,7 @@ final class XRSwiftUIHost<Content: View> {
     private var pressedButtons: Set<XRPanelPointerButton> = []
     private var pendingAccessibilityButton = false
     private var isRealMouseSurfaceActive = false
+    private var savedRealMousePosition: CGPoint?
 
     init(
         pointSize: CGSize,
@@ -126,6 +127,8 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
+        savedRealMousePosition = CGEvent(source: nil)?.location
+
         let desktopFrame = screens.dropFirst().reduce(first.frame) { partial, screen in
             partial.union(screen.frame)
         }
@@ -181,6 +184,15 @@ final class XRSwiftUIHost<Content: View> {
             display: false
         )
         window.orderFront(nil)
+
+        // XRMacPointerCapture calls this before NSCursor.unhide(), so restore the
+        // user's original desktop cursor location while the real pointer is still
+        // invisible. The physical display therefore never shows the confinement
+        // or restoration warp.
+        if let savedRealMousePosition {
+            CGWarpMouseCursorPosition(savedRealMousePosition)
+            self.savedRealMousePosition = nil
+        }
     }
 
     /// Current real macOS cursor position expressed in SwiftXR's normalized
