@@ -165,12 +165,15 @@ public final class XRMacPointerCapture: NSObject {
                     return previous?(event) ?? event
                 }
 
-                return MainActor.assumeIsolated {
-                    guard self.isCaptureWindowEvent(event) else {
-                        return previous?(event) ?? event
-                    }
-                    return self.transformPhysicalEvent(event)
+                let shouldConsume: Bool = MainActor.assumeIsolated {
+                    guard self.isCaptureWindowEvent(event) else { return false }
+                    return self.consumePhysicalEvent(event)
                 }
+
+                if shouldConsume {
+                    return nil
+                }
+                return previous?(event) ?? event
             }
             return
         }
@@ -197,10 +200,12 @@ public final class XRMacPointerCapture: NSObject {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return event }
 
-            return MainActor.assumeIsolated {
-                guard self.isCaptureWindowEvent(event) else { return event }
-                return self.transformPhysicalEvent(event)
+            let shouldConsume: Bool = MainActor.assumeIsolated {
+                guard self.isCaptureWindowEvent(event) else { return false }
+                return self.consumePhysicalEvent(event)
             }
+
+            return shouldConsume ? nil : event
         }
     }
 
@@ -221,12 +226,11 @@ public final class XRMacPointerCapture: NSObject {
         captureWindows.contains { $0.windowNumber == event.windowNumber }
     }
 
-    /// Convert a physical event into a semantic panel event and consume it.
-    /// XRSwiftUIHost will queue the corresponding synthetic event addressed to
-    /// its off-screen window. Returning nil here prevents the real event from
-    /// reaching either the desktop or a native control's tracking loop.
-    private func transformPhysicalEvent(_ event: NSEvent) -> NSEvent? {
-        guard isCaptured || isCaptureRequested else { return event }
+    /// Convert a physical event into a semantic panel event. `true` means the
+    /// original event must be consumed. XRSwiftUIHost queues the corresponding
+    /// synthetic event addressed to its off-screen window.
+    private func consumePhysicalEvent(_ event: NSEvent) -> Bool {
+        guard isCaptured || isCaptureRequested else { return false }
 
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
@@ -238,23 +242,23 @@ public final class XRMacPointerCapture: NSObject {
                     Float(event.deltaY) / yScale
                 )
             )
-            return nil
+            return true
 
         case .leftMouseDown:
             interaction.pointerDown(.primary)
-            return nil
+            return true
         case .leftMouseUp:
             interaction.pointerUp(.primary)
-            return nil
+            return true
         case .rightMouseDown:
             interaction.pointerDown(.secondary)
-            return nil
+            return true
         case .rightMouseUp:
             interaction.pointerUp(.secondary)
-            return nil
+            return true
 
         case .otherMouseDown, .otherMouseUp:
-            return nil
+            return true
 
         case .scrollWheel:
             interaction.scroll(
@@ -263,18 +267,18 @@ public final class XRMacPointerCapture: NSObject {
                     Float(event.scrollingDeltaY) / 40
                 )
             )
-            return nil
+            return true
 
         case .keyDown where event.keyCode == 53:
             escapeRequested = true
             stop()
-            return nil
+            return true
 
         case .keyDown:
-            return event
+            return false
 
         default:
-            return event
+            return false
         }
     }
 
