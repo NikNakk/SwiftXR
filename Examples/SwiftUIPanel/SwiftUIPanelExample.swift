@@ -111,8 +111,6 @@ private func configure(
 struct SwiftUIPanelExample {
     @MainActor
     static func main() throws {
-        // Do not monitor controllers while the app is in the background. Pointer
-        // capture likewise releases automatically whenever SwiftXR loses focus.
         GCController.shouldMonitorBackgroundEvents = false
 
         let instance = try XRInstance(applicationName: "SwiftUI Panel")
@@ -146,9 +144,10 @@ struct SwiftUIPanelExample {
 
         if session.isRunning && !session.shouldExit {
             try pointerCapture.start()
-            // Give AppKit one main-loop turn to complete foreground activation
-            // and install the capture windows before the first interactive frame.
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            guard pointerCapture.isCaptured else {
+                throw XRMacPointerCaptureError.applicationActivationFailed
+            }
+            print("SwiftXR pointer capture active: yes")
         }
         defer {
             pointerCapture.stop()
@@ -184,8 +183,6 @@ struct SwiftUIPanelExample {
                 )
             }
 
-            // The example owns its XR frame loop directly, so give AppKit a short
-            // main-loop turn for captured pointer and SwiftUI responder events.
             RunLoop.current.run(until: Date().addingTimeInterval(0.001))
             frames += 1
         }
