@@ -10,33 +10,36 @@ public enum XRSwiftUIPanelError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .imageRenderingFailed:
-            return "SwiftUI ImageRenderer did not produce a CGImage"
+            return "The hosted SwiftUI surface did not produce a CGImage"
         case .bitmapContextCreationFailed:
-            return "Could not create the Core Graphics bitmap context for the SwiftUI panel"
+            return "Could not create the bitmap backing for the hosted SwiftUI panel"
         case .textureCreationFailed:
             return "Could not create the Metal texture for the SwiftUI panel"
         }
     }
 }
 
-/// A display-only SwiftUI surface rasterized into a shader-readable Metal texture.
+/// A hosted SwiftUI surface rendered into a shader-readable Metal texture.
 ///
-/// The SwiftUI hierarchy is rendered only when the panel is created or `refresh()`
-/// is called. The resulting texture can then be reused on every XR frame without
-/// re-running SwiftUI layout/rasterization at headset refresh rate.
+/// Unlike a simple snapshot, the SwiftUI hierarchy lives inside an off-screen
+/// `NSHostingView` with a real AppKit responder chain. Device-neutral panel
+/// interaction events are translated into AppKit mouse/key events so standard
+/// SwiftUI controls such as `Button`, `Toggle`, `Slider`, and `ScrollView` can
+/// respond without the application reimplementing their behavior.
 ///
-/// `interaction` is deliberately device-neutral. Applications keep using their
-/// normal GameController/AppKit/engine input APIs and forward only panel-relevant
-/// semantic operations such as navigation, selection, pointer movement, or scroll.
+/// The Metal texture is updated after panel interaction and when `refresh()` is
+/// called; it is still reused across XR frames and is not rerasterized at headset
+/// refresh rate.
 @MainActor
 public final class XRSwiftUIPanel<Content: View> {
     private let device: any MTLDevice
-    private let renderer: ImageRenderer<Content>
+    private let host: XRSwiftUIHost<Content>
 
     public let pointSize: CGSize
     public let scale: CGFloat
 
-    /// Semantic panel-input endpoint. This is not a hardware input abstraction.
+    /// Semantic panel-input endpoint. Applications map GameController, AppKit,
+    /// engine input, or future OpenXR/Sense input into this endpoint.
     public let interaction: XRPanelInteraction
 
     public private(set) var texture: any MTLTexture
@@ -55,25 +58,34 @@ public final class XRSwiftUIPanel<Content: View> {
         self.device = device
         self.pointSize = pointSize
         self.scale = scale
-        self.interaction = XRPanelInteraction(handler: interactionHandler)
 
-        let renderer = ImageRenderer(content: content())
-        renderer.proposedSize = ProposedViewSize(
-            width: pointSize.width,
-            height: pointSize.height
+        let interaction = XRPanelInteraction(handler: interactionHandler)
+        let host = XRSwiftUIHost(
+            pointSize: pointSize,
+            scale: scale,
+            content: content()
         )
-        renderer.scale = scale
-        renderer.isOpaque = false
-        self.renderer = renderer
+        let image = try host.renderImage()
 
-        guard let cgImage = renderer.cgImage else {
-            throw XRSwiftUIPanelError.imageRenderingFailed
+        self.interaction = interaction
+        self.host = host
+        self.texture = try Self.makeTexture(device: device, image: image)
+
+        interaction.setInternalHandler { [weak self, weak interaction] event in
+            guard let self, let interaction else { return }
+
+            self.host.handle(
+                event,
+                pointerPosition: interaction.pointerPosition
+            )
+
+            // SwiftUI model changes caused by a control action may be published
+            // on the next main-loop turn. Refresh then rather than rasterizing
+            // before SwiftUI has applied the state change.
+            DispatchQueue.main.async { [weak self] in
+                try? self?.refresh()
+            }
         }
-
-        self.texture = try Self.makeTexture(
-            device: device,
-            image: cgImage
-        )
     }
 
     /// Forward a device-neutral interaction intent to this panel.
@@ -81,21 +93,20 @@ public final class XRSwiftUIPanel<Content: View> {
         interaction.send(event)
     }
 
-    /// Rasterize the panel's current SwiftUI content again and update its texture.
+    /// Rasterize the hosted SwiftUI hierarchy again and update the Metal texture.
     ///
-    /// For mostly-static panels this need only be called when the SwiftUI content
-    /// changes, rather than once per XR frame.
+    /// Call this after application-driven model changes that did not originate
+    /// from `interaction`. Input events sent through the panel refresh it
+    /// automatically on the next main-loop turn.
     public func refresh() throws {
-        guard let cgImage = renderer.cgImage else {
-            throw XRSwiftUIPanelError.imageRenderingFailed
-        }
+        let image = try host.renderImage()
 
-        if texture.width != cgImage.width || texture.height != cgImage.height {
-            texture = try Self.makeTexture(device: device, image: cgImage)
+        if texture.width != image.width || texture.height != image.height {
+            texture = try Self.makeTexture(device: device, image: image)
             return
         }
 
-        try Self.upload(image: cgImage, to: texture)
+        try Self.upload(image: image, to: texture)
     }
 
     private static func makeTexture(
@@ -114,7 +125,7 @@ public final class XRSwiftUIPanel<Content: View> {
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             throw XRSwiftUIPanelError.textureCreationFailed
         }
-        texture.label = "SwiftXR SwiftUI panel"
+        texture.label = "SwiftXR hosted SwiftUI panel"
 
         try upload(image: image, to: texture)
         return texture
@@ -150,8 +161,6 @@ public final class XRSwiftUIPanel<Content: View> {
                 return false
             }
 
-            // Core Graphics and Metal use opposite vertical image conventions for
-            // this bitmap upload path, so write the raster top-to-bottom for Metal.
             context.translateBy(x: 0, y: CGFloat(height))
             context.scaleBy(x: 1, y: -1)
             context.draw(
