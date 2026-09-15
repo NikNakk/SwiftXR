@@ -80,7 +80,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         setupTask?.cancel()
         mediaOpenTask?.cancel()
-        youtubeBrowser?.close()
+        youtubeBrowser?.shutdown()
         pointerCapture?.stop()
         source?.pause()
         ambisonic?.pause()
@@ -105,7 +105,11 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         print("Runtime Metal device: \(session.device.name)")
         print("XR swapchain: \(swapchain.width)x\(swapchain.height), arraySize=2")
 
-        let controls = VideoControlsModel(title: "SwiftXR", projectionMode: .flat)
+        let controls = VideoControlsModel(
+            title: "SwiftXR",
+            projectionMode: .flat,
+            stereoLayout: .mono
+        )
         controls.commandHandler = { [weak self] command in
             guard let self else { return }
             do {
@@ -140,7 +144,10 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
         let panel = try XRSwiftUIPanel(
             device: session.device,
-            pointSize: CGSize(width: 1024, height: 512),
+            pointSize: CGSize(
+                width: YouTubeBrowserController.width,
+                height: YouTubeBrowserController.height
+            ),
             scale: 1,
             interactionHandler: { [weak self] event in
                 self?.handlePanelInteraction(event)
@@ -169,6 +176,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         self.lastSessionState = session.state
 
         print("Projection override: SWIFTXR_VIDEO_PROJECTION=flat|vr180|fisheye|eac360")
+        print("Stereo override: SWIFTXR_VIDEO_STEREO=mono|sbs|tb")
         print("No argument opens Files; explicit file/YouTube arguments still open directly")
         print("Move the mouse to interact; Escape exits")
     }
@@ -227,6 +235,13 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                     print(String(format: "Duration: %.2f s", duration))
                 }
 
+                let stereoLayout = VideoStereoLayout.resolve(
+                    inputPath: resolved.url.path,
+                    projectionMode: projectionMode,
+                    displaySize: newSource.displaySize
+                )
+                print("Stereo layout: \(stereoLayout)")
+
                 _ = VideoAudioRouting.routeToPSVR2(newSource.player)
 
                 var newAmbisonic: AmbisonicAudio?
@@ -248,7 +263,8 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                     device: session.device,
                     swapchain: self.swapchain!,
                     displaySize: newSource.displaySize,
-                    projectionMode: projectionMode
+                    projectionMode: projectionMode,
+                    stereoLayout: stereoLayout
                 )
 
                 self.source?.pause()
@@ -267,12 +283,14 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                     duration: newSource.durationSeconds ?? 0,
                     volume: newSource.volume,
                     projectionMode: projectionMode,
+                    stereoLayout: stereoLayout,
                     spatialAudioEnabled: newAmbisonic != nil
                 )
 
                 self.libraryModel?.showControls()
                 self.panelVisible = true
                 self.lastPanelActivity = Date()
+                self.panelRenderer?.recenter()
                 self.panel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
                 self.panel?.invalidate()
 
@@ -288,6 +306,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                 fputs("swiftxr-video: could not open media: \(error)\n", stderr)
                 self.libraryModel?.showError(String(describing: error))
                 self.panelVisible = true
+                self.panelRenderer?.recenter()
                 self.panel?.invalidate()
             }
         }
@@ -370,6 +389,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
             let currentRenderer = renderer
             let showPanel = libraryModel.mode != .controls || panelVisible
+            let presentation = panelPresentation(for: libraryModel.mode)
             let frame = try session.renderFrame(to: swapchain) {
                 xrFrame,
                 texture,
@@ -391,7 +411,10 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                         panelTexture: panel.texture,
                         pointerPosition: panel.interaction.pointerPosition,
                         commandBuffer: commandBuffer,
-                        clearBeforePanel: currentRenderer == nil
+                        clearBeforePanel: currentRenderer == nil,
+                        worldWidth: presentation.width,
+                        distance: presentation.distance,
+                        verticalOffset: presentation.verticalOffset
                     )
                 }
             }
@@ -439,10 +462,31 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func panelPresentation(for mode: VideoPanelMode) -> (
+        width: Float,
+        distance: Float,
+        verticalOffset: Float
+    ) {
+        switch mode {
+        case .youtube:
+            return (2.55, 1.50, -0.03)
+        case .files:
+            return (2.15, 1.50, -0.08)
+        case .loading:
+            return (2.00, 1.50, -0.08)
+        case .controls:
+            // The controls themselves occupy only the central part of the
+            // 1280x720 texture, so this preserves approximately their previous
+            // physical size while the browser can use the full larger surface.
+            return (2.00, 1.50, -0.14)
+        }
+    }
+
     private func enterYouTubeBrowser() {
         libraryModel?.mode = .youtube
         panelVisible = true
         lastPanelActivity = Date()
+        panelRenderer?.recenter()
         panel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
         panel?.invalidate()
         youtubeBrowser?.open()
@@ -452,6 +496,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         youtubeBrowser?.close()
         libraryModel?.showFiles()
         panelVisible = true
+        panelRenderer?.recenter()
         panel?.invalidate()
     }
 
@@ -466,9 +511,9 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
         case .pointerUp(.primary):
             guard let point = panel?.interaction.pointerPosition else { return }
-            if point.y <= 0.09 && point.x <= 0.12 {
+            if point.y <= 0.075 && point.x <= 0.12 {
                 leaveYouTubeToFiles()
-            } else if point.y <= 0.09 && point.x <= 0.24 {
+            } else if point.y <= 0.075 && point.x <= 0.24 {
                 if youtubeBrowser?.back() != true {
                     leaveYouTubeToFiles()
                 }
@@ -506,8 +551,10 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
         switch command {
         case .showFiles:
+            youtubeBrowser?.close()
             libraryModel?.showFiles()
             panelVisible = true
+            panelRenderer?.recenter()
             panel?.invalidate()
             return
 
@@ -544,10 +591,18 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
 
         case .recenter:
             renderer.recenter()
-            print("[controls] recenter")
+            panelRenderer?.recenter()
+            print("[controls] recenter video + panel")
 
         case let .setProjection(mode):
             renderer.setProjectionMode(mode)
+            controlsModel?.projectionMode = renderer.projectionMode
+            controlsModel?.stereoLayout = renderer.stereoLayout
+            panel?.invalidate()
+
+        case let .setStereoLayout(layout):
+            renderer.setStereoLayout(layout)
+            controlsModel?.stereoLayout = renderer.stereoLayout
             panel?.invalidate()
 
         case .showFiles, .showYouTube:
@@ -598,6 +653,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                 if source != nil {
                     libraryModel.showControls()
                     panelVisible = true
+                    panelRenderer?.recenter()
                     panel?.invalidate()
                 } else {
                     try requestSessionExitIfNeeded()
@@ -606,6 +662,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             if controls.menu, source != nil {
                 libraryModel.showControls()
                 panelVisible = true
+                panelRenderer?.recenter()
                 panel?.invalidate()
             }
 
@@ -631,8 +688,10 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                     by: SIMD2(Float(controls.navX) * 0.075, Float(controls.navY) * 0.10)
                 )
             }
-            if abs(controls.rightY) > 0.18 {
-                youtubeBrowser?.scroll(SIMD2(0, controls.rightY * 0.30))
+            if abs(controls.rightY) > 0.18, dt > 0 {
+                youtubeBrowser?.scroll(
+                    SIMD2(0, controls.rightY * Float(dt) * 4.0)
+                )
             }
             if controls.select, let point = panel?.interaction.pointerPosition {
                 youtubeBrowser?.click(at: point)
@@ -646,6 +705,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                 youtubeBrowser?.close()
                 libraryModel.showControls()
                 panelVisible = true
+                panelRenderer?.recenter()
                 panel?.invalidate()
             }
 
@@ -654,6 +714,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
                 mediaOpenGeneration += 1
                 mediaOpenTask?.cancel()
                 libraryModel.showFiles()
+                panelRenderer?.recenter()
                 panel?.invalidate()
             }
 
@@ -661,6 +722,9 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             if controls.menu {
                 panelVisible.toggle()
                 lastPanelActivity = Date()
+                if panelVisible {
+                    panelRenderer?.recenter()
+                }
                 panel?.invalidate()
             }
             if controls.back {
@@ -704,6 +768,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
             duration: source.durationSeconds ?? 0,
             volume: source.volume,
             projectionMode: renderer.projectionMode,
+            stereoLayout: renderer.stereoLayout,
             spatialAudioEnabled: ambisonic != nil
         )
         if changed, libraryModel?.mode == .controls, panelVisible {
@@ -750,7 +815,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
         guard !exitRequested else { return }
         exitRequested = true
         mediaOpenTask?.cancel()
-        youtubeBrowser?.close()
+        youtubeBrowser?.shutdown()
         pointerCapture?.stop()
         source?.pause()
         ambisonic?.pause()
@@ -774,7 +839,7 @@ private final class VideoPlayerAppDelegate: NSObject, NSApplicationDelegate {
     private func fail(_ error: Error) {
         fputs("swiftxr-video: \(error)\n", stderr)
         mediaOpenTask?.cancel()
-        youtubeBrowser?.close()
+        youtubeBrowser?.shutdown()
         pointerCapture?.stop()
         source?.pause()
         ambisonic?.pause()
