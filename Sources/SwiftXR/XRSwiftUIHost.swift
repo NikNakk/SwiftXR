@@ -5,6 +5,16 @@ import SwiftUI
 private final class XRSwiftUIHostingWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    var syntheticEventDidDispatch: (() -> Void)?
+
+    override func sendEvent(_ event: NSEvent) {
+        super.sendEvent(event)
+
+        if event.eventNumber == swiftXRSyntheticPanelEventNumber {
+            syntheticEventDidDispatch?()
+        }
+    }
 }
 
 @MainActor
@@ -55,6 +65,10 @@ final class XRSwiftUIHost<Content: View> {
         self.hostingView = hostingView
     }
 
+    func setSyntheticEventDispatchHandler(_ handler: @escaping () -> Void) {
+        window.syntheticEventDidDispatch = handler
+    }
+
     func renderImage() throws -> CGImage {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
@@ -100,7 +114,7 @@ final class XRSwiftUIHost<Content: View> {
 
         case .pointerMoved, .pointerMovedBy:
             guard let pointerPosition else { return }
-            sendPointerMove(to: pointerPosition)
+            postPointerMove(to: pointerPosition)
 
         case .pointerExited:
             break
@@ -108,11 +122,11 @@ final class XRSwiftUIHost<Content: View> {
         case let .pointerDown(button):
             guard let pointerPosition else { return }
             pressedButtons.insert(button)
-            sendPointerButton(button, down: true, at: pointerPosition)
+            postPointerButton(button, down: true, at: pointerPosition)
 
         case let .pointerUp(button):
             guard let pointerPosition else { return }
-            sendPointerButton(button, down: false, at: pointerPosition)
+            postPointerButton(button, down: false, at: pointerPosition)
             pressedButtons.remove(button)
 
         case let .scroll(delta):
@@ -121,9 +135,6 @@ final class XRSwiftUIHost<Content: View> {
     }
 
     private func prepareForInteraction() {
-        // SwiftUI controls expect a normal key-window responder environment.
-        // The window remains physically off-screen, but making it key lets
-        // AppKit/NSHostingView perform ordinary hit testing and tracking.
         if !window.isKeyWindow {
             window.makeKey()
         }
@@ -132,7 +143,11 @@ final class XRSwiftUIHost<Content: View> {
         }
     }
 
-    private func sendPointerMove(to normalizedPosition: SIMD2<Float>) {
+    /// Post pointer motion onto NSApplication's event queue rather than calling
+    /// NSWindow.sendEvent synchronously from inside the physical-mouse capture
+    /// monitor. This lets SwiftUI gesture recognizers see an ordinary ordered
+    /// mouseDown -> mouseDragged -> mouseUp stream.
+    private func postPointerMove(to normalizedPosition: SIMD2<Float>) {
         prepareForInteraction()
 
         let point = windowPoint(for: normalizedPosition)
@@ -153,20 +168,17 @@ final class XRSwiftUIHost<Content: View> {
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber,
             context: nil,
-            eventNumber: 0,
+            eventNumber: swiftXRSyntheticPanelEventNumber,
             clickCount: pressedButtons.isEmpty ? 0 : 1,
             pressure: pressedButtons.isEmpty ? 0 : 1
         ) else {
             return
         }
 
-        // Use normal NSWindow dispatch. This is important for controls that use
-        // AppKit's tracking/hit-testing machinery (notably Button and Slider),
-        // rather than only the simpler direct NSHostingView tap path.
-        window.sendEvent(event)
+        NSApplication.shared.postEvent(event, atStart: false)
     }
 
-    private func sendPointerButton(
+    private func postPointerButton(
         _ button: XRPanelPointerButton,
         down: Bool,
         at normalizedPosition: SIMD2<Float>
@@ -190,14 +202,14 @@ final class XRSwiftUIHost<Content: View> {
             timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber,
             context: nil,
-            eventNumber: 0,
+            eventNumber: swiftXRSyntheticPanelEventNumber,
             clickCount: 1,
             pressure: down ? 1 : 0
         ) else {
             return
         }
 
-        window.sendEvent(event)
+        NSApplication.shared.postEvent(event, atStart: false)
     }
 
     private func sendScroll(
