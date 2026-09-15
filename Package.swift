@@ -20,6 +20,7 @@ let package = Package(
         .executable(name: "hello-swiftxr", targets: ["HelloSwiftXR"]),
         .executable(name: "minimal-swiftxr-logo", targets: ["MinimalSwiftXRLogo"]),
         .executable(name: "swiftui-panel", targets: ["SwiftUIPanelExample"]),
+        .executable(name: "swiftxr-input-demo", targets: ["SwiftXRInputDemo"]),
     ],
     targets: [
         .systemLibrary(
@@ -51,6 +52,12 @@ let package = Package(
             name: "SwiftUIPanelExample",
             dependencies: ["SwiftXR"],
             path: "Examples/SwiftUIPanel",
+            linkerSettings: openXRExecutableLinkerSettings
+        ),
+        .executableTarget(
+            name: "SwiftXRInputDemo",
+            dependencies: ["SwiftXR"],
+            path: "Examples/HostInputDemo",
             linkerSettings: openXRExecutableLinkerSettings
         ),
     ]
