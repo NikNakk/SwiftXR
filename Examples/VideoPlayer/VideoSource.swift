@@ -12,6 +12,8 @@ struct VideoFrame {
 
 enum VideoSourceError: Error, CustomStringConvertible {
     case noVideoTrack
+    case playerItemFailed(String)
+    case playerItemReadinessTimedOut
     case textureCacheCreationFailed(CVReturn)
     case textureCreationFailed(CVReturn)
     case missingMetalTexture
@@ -20,6 +22,10 @@ enum VideoSourceError: Error, CustomStringConvertible {
         switch self {
         case .noVideoTrack:
             return "The input does not contain a video track"
+        case let .playerItemFailed(message):
+            return "AVPlayerItem failed: \(message)"
+        case .playerItemReadinessTimedOut:
+            return "Timed out waiting for AVPlayerItem to become ready to play"
         case let .textureCacheCreationFailed(status):
             return "CVMetalTextureCacheCreate failed with status \(status)"
         case let .textureCreationFailed(status):
@@ -128,6 +134,33 @@ final class VideoSource {
         )
     }
 
+    func waitUntilReady(timeout: TimeInterval = 5) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            guard let item = player.currentItem else {
+                throw VideoSourceError.playerItemFailed("AVPlayer has no current item")
+            }
+
+            switch item.status {
+            case .readyToPlay:
+                return
+            case .failed:
+                throw VideoSourceError.playerItemFailed(
+                    item.error?.localizedDescription ?? "unknown AVFoundation error"
+                )
+            case .unknown:
+                break
+            @unknown default:
+                break
+            }
+
+            try await Task<Never, Never>.sleep(nanoseconds: 10_000_000)
+        }
+
+        throw VideoSourceError.playerItemReadinessTimedOut
+    }
+
     func play() {
         player.play()
     }
@@ -144,6 +177,20 @@ final class VideoSource {
     var currentTimeSeconds: Double {
         let seconds = CMTimeGetSeconds(player.currentTime())
         return seconds.isFinite ? seconds : 0
+    }
+
+    var playbackRate: Float {
+        player.rate
+    }
+
+    var itemStatusDescription: String {
+        guard let item = player.currentItem else { return "missing" }
+        switch item.status {
+        case .unknown: return "unknown"
+        case .readyToPlay: return "ready"
+        case .failed: return "failed"
+        @unknown default: return "future(\(item.status.rawValue))"
+        }
     }
 
     var failureDescription: String? {
