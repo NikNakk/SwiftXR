@@ -11,7 +11,7 @@
 - Keep the framework below the level of a scene engine. SwiftXR should be closer to MetalKit than to Unity, Godot or RealityKit.
 - Do not wrap mature host input APIs unnecessarily. Games should continue to use Apple's `GameController`, AppKit, or their engine's input system directly.
 
-## Current milestone: world-locked stereo Metal rendering
+## Current milestone
 
 SwiftXR can now:
 
@@ -23,20 +23,13 @@ SwiftXR can now:
 6. Handle the core OpenXR session lifecycle and exit conditions.
 7. Run paced frames through `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews`, and `xrEndFrame`.
 8. Expose predicted timing, stereo poses/FOVs, and view-tracking validity as Swift values.
-9. Query recommended stereo view dimensions and runtime-supported Metal swapchain formats.
-10. Create one stereo OpenXR swapchain with `arraySize=2` and bridge its `XrSwapchainImageMetalKHR` images to `MTLTextureType2DArray` textures.
-11. Own the acquire/wait/Metal-submit/release sequence for each rendered frame.
-12. Submit an `XrCompositionLayerProjection` whose two views use array slices 0 and 1.
-13. Convert OpenXR poses and asymmetric FOVs into Metal-compatible view/projection matrices.
-14. Render a true world-locked 3D scene independently for each eye.
-15. Rasterize display-only SwiftUI views into reusable Metal textures with `XRSwiftUIPanel`.
-16. Expose device-neutral panel interaction events without wrapping host game-controller or mouse APIs.
+9. Create and drive a stereo Metal array swapchain and submit a real projection layer.
+10. Convert OpenXR poses/FOVs into Metal-compatible view/projection matrices.
+11. Render world-locked 6DoF Metal content independently for each eye.
+12. Host normal SwiftUI views off-screen and expose them as reusable Metal textures in XR.
+13. Route device-neutral panel interaction events into a real `NSHostingView` responder chain so standard SwiftUI controls can receive pointer, scroll, navigation, select, and back input.
 
-The rendered-frame API hands application code an `XRFrame`, the acquired two-layer `MTLTexture`, and an `MTLCommandBuffer`. SwiftXR keeps the OpenXR swapchain/frame state machine out of the application and waits for the final Metal command buffer before destroying the swapchain.
-
-`XRView` exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`. The projection helper converts OpenXR's right-handed, -Z-forward asymmetric FOV into Metal's 0...1 normalized depth convention.
-
-`XRSwiftUIPanel` uses SwiftUI `ImageRenderer` to rasterize a view into an sRGB Metal texture. The texture is reused across XR frames and is only regenerated when `refresh()` is called, so mostly-static UI does not need to be rasterized at headset refresh rate.
+`XRView` exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`.
 
 ## Host input and XR panels
 
@@ -48,6 +41,7 @@ SwiftXR instead provides a semantic interaction endpoint on each panel:
 panel.interaction.navigate(.down)
 panel.interaction.select()
 panel.interaction.back()
+
 panel.interaction.movePointer(to: SIMD2(0.4, 0.7))
 panel.interaction.movePointer(by: SIMD2(0.01, -0.02))
 panel.interaction.scroll(SIMD2(0, -1))
@@ -55,9 +49,13 @@ panel.interaction.pointerDown()
 panel.interaction.pointerUp()
 ```
 
-This gives applications one stable way to control an XR UI surface regardless of where the input came from.
+The panel is backed by an off-screen `NSHostingView` attached to an AppKit responder chain. SwiftXR translates those semantic operations into normal AppKit mouse/key events, so standard SwiftUI controls such as `Button`, `Toggle`, `Slider`, and `ScrollView` can behave normally.
 
-For a standard game controller, use `GameController` directly and forward only panel-related intents:
+The texture is not rerasterized at headset refresh rate. It is updated after interaction, or when `refresh()` is called after an application-driven model change.
+
+### GameController example
+
+Use `GameController` directly and forward only UI-relevant intents:
 
 ```swift
 let pad = controller.extendedGamepad!
@@ -75,12 +73,14 @@ pad.buttonB.pressedChangedHandler = { _, _, pressed in
 }
 ```
 
-Likewise, an AppKit mouse view can forward relative motion, clicks, and scrolling without SwiftXR duplicating `NSEvent`:
+### Mouse example
+
+Likewise, an app can forward AppKit or `GCMouse` input directly:
 
 ```swift
 override func mouseMoved(with event: NSEvent) {
     panel.interaction.movePointer(
-        by: SIMD2(Float(event.deltaX), Float(event.deltaY)) * sensitivity
+        by: SIMD2(Float(event.deltaX), Float(-event.deltaY)) * sensitivity
     )
 }
 
@@ -99,96 +99,45 @@ override func scrollWheel(with event: NSEvent) {
 }
 ```
 
-A future Sense-controller path can hit-test a 6DoF controller ray against the same panel and send the resulting normalized panel coordinate through `movePointer(to:)`, with trigger press/release mapped to `pointerDown()`/`pointerUp()`. The panel interaction API therefore does not need to change when Sense 6DoF support arrives.
+A future Sense-controller path can hit-test a 6DoF controller ray against the same panel and send a normalized panel coordinate through `movePointer(to:)`, with trigger press/release mapped to `pointerDown()`/`pointerUp()`. The panel API does not need to change when Sense 6DoF arrives.
 
-The current `ImageRenderer` SwiftUI bridge remains display-only: `XRPanelInteraction` provides the stable semantic boundary and pointer bookkeeping now, while fully dispatching these events into standard hosted SwiftUI controls is the next interaction-layer step.
+## Examples
 
-The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
+### `hello-swiftxr`
 
-On macOS, a default CMake installation of the Khronos OpenXR loader commonly places `libopenxr_loader.dylib` in `/usr/local/lib`. The SwiftXR example executables therefore include `/usr/local/lib` in their runtime library search path. Applications that consume SwiftXR as a library should likewise ensure that their executable can locate the OpenXR loader installed on the system.
-
-## Example program
-
-`Examples/HelloSwiftXR` is a small native Swift + Metal application built entirely on the public SwiftXR API. It creates a Metal-backed OpenXR session and stereo array swapchain, then renders a static coloured cube over a floor grid using the live per-eye OpenXR view poses and FOVs.
-
-The scene is deliberately anchored in `LOCAL` space. The grid is placed approximately 1.5 m below the local origin and the cube roughly 2 m in front of it, so rotating, translating, leaning, or looking around the object should visibly demonstrate 6DoF world locking.
-
-Run it with:
+A diagnostic world-locked cube + floor-grid sample.
 
 ```sh
 swift run hello-swiftxr
 ```
 
-## Minimal example
+### `minimal-swiftxr-logo`
 
-`Examples/MinimalSwiftXRLogo` removes the diagnostics and renders a small world-locked SwiftXR mark: a cyan ring with a two-colour `X`. The application-side lifecycle is intentionally compact:
-
-```swift
-let instance = try XRInstance(applicationName: "SwiftXR Logo")
-let session = try instance.system().makeSession()
-let swapchain = try session.makeStereoSwapchain()
-let logo = try LogoRenderer(device: session.device, swapchain: swapchain)
-
-while !session.isRunning && !session.shouldExit {
-    try session.pollEvents()
-}
-
-while session.isRunning && !session.shouldExit {
-    try session.pollEvents()
-    try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
-        try logo.encode(frame: frame, texture: texture, commandBuffer: commandBuffer)
-    }
-}
-```
-
-The checked-in sample runs for 900 frames and then requests a clean exit so it can be used as a deterministic smoke test.
-
-Run it with:
+A deliberately compact application showing how little XR-specific code is needed to render a world-locked SwiftXR mark.
 
 ```sh
 swift run minimal-swiftxr-logo
 ```
 
-## SwiftUI panel example
+### `swiftui-panel`
 
-`Examples/SwiftUIPanel` proves that normal macOS SwiftUI can be used as a display surface inside OpenXR. The sample builds a card from ordinary `Image`, `Text`, `VStack`, `LinearGradient`, and rounded-shape views, rasterizes it once with `XRSwiftUIPanel`, then places the resulting Metal texture on a world-locked quad roughly 1.8 m in front of the user.
-
-The SwiftUI side is ordinary SwiftUI:
-
-```swift
-let panel = try XRSwiftUIPanel(
-    device: session.device,
-    pointSize: CGSize(width: 496, height: 296),
-    scale: 2
-) {
-    VStack(spacing: 12) {
-        Image(systemName: "swift")
-            .font(.system(size: 64))
-            .foregroundStyle(.orange)
-
-        Text("SwiftXR")
-            .font(.system(size: 48, weight: .bold, design: .rounded))
-
-        Text("SwiftUI → Metal → OpenXR")
-    }
-}
-```
-
-Run it with:
+A hosted interactive SwiftUI surface in XR. The sample contains real `Button`, `Toggle`, and `Slider` controls and maps Apple's `GameController` / `GCMouse` APIs directly into `panel.interaction`. It also draws a virtual cursor in the headset because the macOS system cursor is not part of the off-screen texture.
 
 ```sh
 swift run swiftui-panel
 ```
 
-There is also a smaller loader/runtime diagnostic executable:
+### `swiftxr-probe`
+
+A small loader/runtime diagnostic.
 
 ```sh
 swift run swiftxr-probe
 ```
 
-## Intended v0.1 API boundary
+## Intended application-facing boundary
 
-The application-facing shape is converging on:
+The rendering side is converging on:
 
 ```swift
 let swapchain = try session.makeStereoSwapchain()
@@ -206,20 +155,23 @@ try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
 }
 ```
 
-Application code receives predicted frame timing, located views, Metal render targets and matrices without manually driving the OpenXR frame or swapchain state machines.
+For UI, applications keep their existing input system and only send panel-specific semantic events into SwiftXR.
 
 ## v0.1 implementation sequence
 
-1. ✅ `XRInstance`: create/destroy an instance with `XR_KHR_metal_enable` and expose runtime properties.
-2. ✅ `XRSystem`: select the HMD system, expose system properties and query the required Metal device.
-3. ✅ `XRSession`: create a command queue from the runtime-provided `MTLDevice`, create the Metal session, handle session-state transitions and create a `LOCAL` reference space.
-4. ✅ `XRFrame`: wrap `xrWaitFrame`, `xrBeginFrame`, `xrLocateViews` and frame submission with predicted timing and Swift view values.
-5. ✅ `XRSwapchain`: create and enumerate a stereo Metal array swapchain and expose its `MTLTexture` images safely.
-6. ✅ Submit a real stereo projection layer from Swift/Metal through OpenXR.
-7. ✅ Add Metal view/projection matrix helpers and a world-locked 6DoF sample scene.
-8. ✅ Add display-only SwiftUI panel rasterization and a world-space SwiftUI example.
-9. ✅ Add a device-neutral panel interaction boundary without wrapping host input APIs.
-10. Next: dispatch panel interaction events into standard hosted SwiftUI controls, then add OpenXR actions/controllers and haptics.
+1. ✅ `XRInstance`
+2. ✅ `XRSystem` + runtime-selected Metal device
+3. ✅ Metal `XRSession` + lifecycle + `LOCAL` space
+4. ✅ paced frame loop and stereo views
+5. ✅ stereo Metal array swapchain
+6. ✅ projection-layer submission
+7. ✅ view/projection matrices + world-locked sample
+8. ✅ SwiftUI-to-Metal panel rendering
+9. ✅ device-neutral panel interaction boundary
+10. ✅ hosted interactive SwiftUI controls with gamepad/mouse forwarding
+11. Next: refine panel focus/navigation behavior, then add OpenXR actions/Sense controllers and haptics when the runtime tracking work is ready.
+
+The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker. On macOS a default CMake install commonly places `libopenxr_loader.dylib` in `/usr/local/lib`; the example executables include that directory in their rpath.
 
 ## Non-goals
 
