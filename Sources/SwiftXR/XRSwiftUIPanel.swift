@@ -79,9 +79,14 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            // SwiftUI model changes caused by a control action may be published
-            // on the next main-loop turn. Refresh then rather than rasterizing
-            // before SwiftUI has applied the state change.
+            // Most AppKit/SwiftUI control updates are observable immediately when
+            // the responder call returns, so refresh synchronously for CLI-style
+            // XR loops that do not otherwise spin the AppKit run loop.
+            try? self.refresh()
+
+            // Some SwiftUI state propagation is deferred to the next main-loop
+            // turn; refresh once more then as a safety net when a normal app run
+            // loop is present.
             DispatchQueue.main.async { [weak self] in
                 try? self?.refresh()
             }
@@ -97,7 +102,7 @@ public final class XRSwiftUIPanel<Content: View> {
     ///
     /// Call this after application-driven model changes that did not originate
     /// from `interaction`. Input events sent through the panel refresh it
-    /// automatically on the next main-loop turn.
+    /// automatically.
     public func refresh() throws {
         let image = try host.renderImage()
 
