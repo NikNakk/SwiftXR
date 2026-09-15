@@ -134,10 +134,6 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     private var exitRequested = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // This process is now a genuine LaunchServices-launched .app, so request
-        // normal foreground activation here rather than asking the original
-        // SwiftPM/Terminal child to promote itself. Repeat on the next run-loop
-        // turn because activation is asynchronous on current macOS.
         NSApplication.shared.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -188,9 +184,10 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
             panelTexture: panel.texture
         )
 
-        let pointerCapture = XRMacPointerCapture(
-            interaction: panel.interaction
-        )
+        // This initializer uses XRMacApplication.nextEvent(...) so native AppKit
+        // tracking semantics reach the hidden SwiftUI window even inside nested
+        // control-tracking loops (for example while dragging a Slider).
+        let pointerCapture = XRMacPointerCapture(panel: panel)
 
         self.instance = instance
         self.session = session
@@ -238,6 +235,10 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
 
+                // Native AppKit input marks the hosted SwiftUI surface dirty.
+                // Usually this is a no-op; during hover/press/drag it updates the
+                // retained Metal texture before the next XR frame is drawn.
+                try panel.refreshIfNeeded()
                 renderer.pointerPosition = panel.interaction.pointerPosition
 
                 try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
@@ -382,7 +383,7 @@ struct SwiftUIPanelExample {
             "CFBundleVersion": "1",
             "LSMinimumSystemVersion": "14.0",
             "NSHighResolutionCapable": true,
-            "NSPrincipalClass": "NSApplication",
+            "NSPrincipalClass": "XRMacApplication",
             "LSEnvironment": launchEnvironment,
         ]
 
