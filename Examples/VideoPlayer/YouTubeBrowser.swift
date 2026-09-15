@@ -15,6 +15,7 @@ final class YouTubeBrowserController: NSObject {
     private var needsSnapshot = true
     private var lastSnapshot = Date.distantPast
     private var textInputFocused = false
+    private var isShutdown = false
 
     var onSnapshot: ((NSImage?) -> Void)?
     var onLaunchURL: ((String) -> Void)?
@@ -59,13 +60,19 @@ final class YouTubeBrowserController: NSObject {
         window.orderFront(nil)
     }
 
-    deinit {
+    /// Break WebKit's strong script-message-handler ownership before the player
+    /// terminates. This is explicit rather than `deinit` because AppKit/WebKit
+    /// teardown APIs are MainActor-isolated in Swift 6.
+    func shutdown() {
+        guard !isShutdown else { return }
+        isShutdown = true
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "swiftXRVR")
         webView.navigationDelegate = nil
         window.orderOut(nil)
     }
 
     func open() {
+        guard !isShutdown else { return }
         window.orderFront(nil)
         needsSnapshot = true
         onStatus?("Loading YouTube VR…")
@@ -85,7 +92,7 @@ final class YouTubeBrowserController: NSObject {
     }
 
     func tick() {
-        guard !snapshotPending else { return }
+        guard !isShutdown, !snapshotPending else { return }
         let now = Date()
         guard needsSnapshot || now.timeIntervalSince(lastSnapshot) >= Self.snapshotInterval else {
             return
@@ -115,6 +122,7 @@ final class YouTubeBrowserController: NSObject {
     }
 
     func click(at normalizedPoint: SIMD2<Float>) {
+        guard !isShutdown else { return }
         let u = min(max(Double(normalizedPoint.x), 0), 1)
         let v = min(max(Double(normalizedPoint.y), 0), 1)
         let x = u * Double(Self.width)
@@ -146,6 +154,7 @@ final class YouTubeBrowserController: NSObject {
     }
 
     func scroll(_ delta: SIMD2<Float>) {
+        guard !isShutdown else { return }
         let amount = -Double(delta.y) * 220
         guard abs(amount) > 0.5 else { return }
         let script = "window.scrollBy(0, \(String(format: "%.1f", amount)));"
@@ -154,6 +163,7 @@ final class YouTubeBrowserController: NSObject {
     }
 
     func back() -> Bool {
+        guard !isShutdown else { return false }
         textInputFocused = false
         if webView.canGoBack {
             webView.goBack()
@@ -231,29 +241,21 @@ final class YouTubeBrowserController: NSObject {
 }
 
 extension YouTubeBrowserController: WKScriptMessageHandler, WKNavigationDelegate {
-    nonisolated func userContentController(
+    func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
         guard message.name == "swiftXRVR", let url = message.body as? String else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            print("[youtube-ui] VR launch requested: \(url)")
-            self.onLaunchURL?(url)
-        }
+        print("[youtube-ui] VR launch requested: \(url)")
+        onLaunchURL?(url)
     }
 
-    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        Task { @MainActor [weak self] in
-            self?.needsSnapshot = true
-        }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        needsSnapshot = true
     }
 
-    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.needsSnapshot = true
-            self.onStatus?("YouTube VR")
-        }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        needsSnapshot = true
+        onStatus?("YouTube VR")
     }
 }
