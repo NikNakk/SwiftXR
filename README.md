@@ -28,12 +28,13 @@ SwiftXR can now:
 11. Render world-locked 6DoF Metal content independently for each eye.
 12. Host normal SwiftUI views off-screen and expose them as reusable Metal textures in XR.
 13. Route device-neutral panel interaction events into a real `NSHostingView` responder chain so standard SwiftUI controls can receive pointer, scroll, navigation, select, and back input.
+14. Capture the ordinary macOS mouse/trackpad exclusively for XR without moving or clicking the desktop cursor.
 
 `XRView` exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`.
 
 ## Host input and XR panels
 
-SwiftXR deliberately does **not** provide a replacement for Apple's `GameController` framework or AppKit mouse handling. A game should use its normal input architecture directly.
+SwiftXR deliberately does **not** provide a replacement for Apple's `GameController` framework or AppKit input model. A game should use its normal input architecture directly.
 
 SwiftXR instead provides a semantic interaction endpoint on each panel:
 
@@ -73,31 +74,24 @@ pad.buttonB.pressedChangedHandler = { _, _, pressed in
 }
 ```
 
-### Mouse example
+### Exclusive Mac pointer capture
 
-Likewise, an app can forward AppKit or `GCMouse` input directly:
+For a mouse or trackpad used as an XR pointer, use `XRMacPointerCapture` rather than polling the normal desktop cursor:
 
 ```swift
-override func mouseMoved(with event: NSEvent) {
-    panel.interaction.movePointer(
-        by: SIMD2(Float(event.deltaX), Float(-event.deltaY)) * sensitivity
-    )
-}
+let pointerCapture = XRMacPointerCapture(
+    interaction: panel.interaction
+)
 
-override func mouseDown(with event: NSEvent) {
-    panel.interaction.pointerDown()
-}
-
-override func mouseUp(with event: NSEvent) {
-    panel.interaction.pointerUp()
-}
-
-override func scrollWheel(with event: NSEvent) {
-    panel.interaction.scroll(
-        SIMD2(Float(event.scrollingDeltaX), Float(event.scrollingDeltaY))
-    )
-}
+try pointerCapture.start()
+defer { pointerCapture.stop() }
 ```
+
+While active, SwiftXR makes the process a foreground AppKit application, places transparent input-capture windows over the attached Mac displays, hides and disassociates the system cursor, and forwards relative mouse/trackpad deltas, buttons, and scrolling into `XRPanelInteraction`. The desktop pointer therefore remains stationary and desktop applications do not receive the captured clicks.
+
+If SwiftXR loses foreground focus (for example via Cmd-Tab), capture is suspended immediately and the system cursor is restored. It is reacquired when the application becomes active again while capture is still requested. Escape releases capture and sets `escapeRequested`, which the sample uses as a request to leave XR.
+
+This uses AppKit/Core Graphics for pointer ownership; `GCMouse` remains useful when an application specifically wants GameController's representation of a physical mouse, but it does not itself provide exclusive desktop cursor capture.
 
 A future Sense-controller path can hit-test a 6DoF controller ray against the same panel and send a normalized panel coordinate through `movePointer(to:)`, with trigger press/release mapped to `pointerDown()`/`pointerUp()`. The panel API does not need to change when Sense 6DoF arrives.
 
@@ -121,7 +115,7 @@ swift run minimal-swiftxr-logo
 
 ### `swiftui-panel`
 
-A hosted interactive SwiftUI surface in XR. The sample contains real `Button`, `Toggle`, and `Slider` controls and maps Apple's `GameController` / `GCMouse` APIs directly into `panel.interaction`. It also draws a virtual cursor in the headset because the macOS system cursor is not part of the off-screen texture.
+A hosted interactive SwiftUI surface in XR. The sample contains real `Button`, `Toggle`, and `Slider` controls, draws a virtual cursor in the headset, uses `XRMacPointerCapture` for exclusive mouse/trackpad interaction, and continues to accept normal `GameController` navigation input.
 
 ```sh
 swift run swiftui-panel
@@ -169,9 +163,10 @@ For UI, applications keep their existing input system and only send panel-specif
 8. ✅ SwiftUI-to-Metal panel rendering
 9. ✅ device-neutral panel interaction boundary
 10. ✅ hosted interactive SwiftUI controls with gamepad/mouse forwarding
-11. Next: refine panel focus/navigation behavior, then add OpenXR actions/Sense controllers and haptics when the runtime tracking work is ready.
+11. ✅ exclusive macOS mouse/trackpad capture for XR UI
+12. Next: refine panel focus/navigation behavior, then add OpenXR actions/Sense controllers and haptics when the runtime tracking work is ready.
 
-The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker. On macOS a default CMake install commonly places `libopenxr_loader.dylib` in `/usr/local/lib`; the example executables include that directory in their rpath.
+The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker. On macOS a default CMake install commonly places `libopenxr_loader.dylib` in `/usr/local/lib`; the example executables include that directory in their link and runtime search paths.
 
 ## Non-goals
 
