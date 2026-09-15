@@ -27,9 +27,9 @@ final class VideoControlPanelRenderer {
         device: any MTLDevice,
         swapchain: XRSwapchain,
         panelTexture: any MTLTexture,
-        worldWidth: Float = 1.36,
+        worldWidth: Float = 1.62,
         distance: Float = 1.45,
-        verticalOffset: Float = -0.48
+        verticalOffset: Float = -0.18
     ) throws {
         textureAspect = Float(panelTexture.width) / Float(max(panelTexture.height, 1))
 
@@ -84,7 +84,8 @@ final class VideoControlPanelRenderer {
         swapchainTexture: any MTLTexture,
         panelTexture: any MTLTexture,
         pointerPosition: SIMD2<Float>?,
-        commandBuffer: any MTLCommandBuffer
+        commandBuffer: any MTLCommandBuffer,
+        clearBeforePanel: Bool = false
     ) throws {
         guard frame.views.count >= 2 else { return }
 
@@ -93,15 +94,21 @@ final class VideoControlPanelRenderer {
             pass.colorAttachments[0].texture = swapchainTexture
             pass.colorAttachments[0].slice = eye
             pass.colorAttachments[0].level = 0
-            pass.colorAttachments[0].loadAction = .load
+            pass.colorAttachments[0].loadAction = clearBeforePanel ? .clear : .load
             pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColor(
+                red: 0.012,
+                green: 0.016,
+                blue: 0.026,
+                alpha: 1
+            )
 
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
                 throw VideoControlPanelRendererError.encoderCreationFailed
             }
             encoder.label = eye == 0
-                ? "SwiftXR video controls left eye"
-                : "SwiftXR video controls right eye"
+                ? "SwiftXR video panel left eye"
+                : "SwiftXR video panel right eye"
 
             let pointer = pointerPosition ?? .zero
             var uniforms = VideoControlPanelUniforms(
