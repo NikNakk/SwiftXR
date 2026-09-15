@@ -1,3 +1,4 @@
+@preconcurrency import AVFoundation
 import CoreMedia
 import Darwin
 import Foundation
@@ -18,26 +19,21 @@ struct SwiftXRVideoPlayer {
     @MainActor
     private static func run() async throws {
         guard CommandLine.arguments.count == 2 else {
-            fputs("usage: swiftxr-video /path/to/movie.mp4\n", stderr)
+            fputs("usage: swiftxr-video /path/to/movie.mp4\n       swiftxr-video https://youtube.com/watch?v=...\n", stderr)
             exit(2)
         }
 
-        let expandedPath = NSString(
-            string: CommandLine.arguments[1]
-        ).expandingTildeInPath
-        guard FileManager.default.fileExists(atPath: expandedPath) else {
-            throw NSError(
-                domain: "SwiftXR.VideoPlayer",
-                code: 1,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "Video file does not exist: \(expandedPath)"
-                ]
-            )
-        }
-        let url = URL(fileURLWithPath: expandedPath)
+        let rawInput = CommandLine.arguments[1]
+        print("SwiftXR video player")
+        print("Input: \(rawInput)")
 
-        print("SwiftXR video player proof of concept")
-        print("Input: \(url.path)")
+        let resolved = try MediaInputResolver.resolve(rawInput)
+        print("Resolved media: \(resolved.url.path)")
+        let projectionMode = VideoProjectionMode.resolve(
+            inputPath: resolved.url.path,
+            youtubeEACHint: resolved.youtubeEACHint
+        )
+        print("Projection: \(projectionMode)")
 
         let capabilities = try XRRuntime.capabilities()
         try capabilities.requireMetal()
@@ -54,7 +50,7 @@ struct SwiftXRVideoPlayer {
         print("XR swapchain: \(swapchain.width)x\(swapchain.height), arraySize=2")
 
         print("Opening video with AVFoundation…")
-        let source = try await VideoSource.open(url: url, device: session.device)
+        let source = try await VideoSource.open(url: resolved.url, device: session.device)
         let aspect = source.displaySize.width / max(source.displaySize.height, 1)
         print(
             String(
@@ -72,20 +68,43 @@ struct SwiftXRVideoPlayer {
         try await source.waitUntilReady()
         print("AVPlayerItem status: \(source.itemStatusDescription)")
 
+        _ = VideoAudioRouting.routeToPSVR2(source.player)
+
+        var ambisonic: AmbisonicAudio?
+        if let sidecar = resolved.ambisonicURL {
+            do {
+                let spatial = try AmbisonicAudio(sidecarURL: sidecar)
+                spatial.setVolume(source.volume)
+                source.player.isMuted = true
+                source.player.automaticallyWaitsToMinimizeStalling = false
+                ambisonic = spatial
+            } catch {
+                fputs("[audio] AmbiX unavailable (\(error)); using stereo AVPlayer audio\n", stderr)
+                source.player.isMuted = false
+                source.player.automaticallyWaitsToMinimizeStalling = true
+            }
+        }
+
         let renderer = try VideoRenderer(
             device: session.device,
             swapchain: swapchain,
-            displaySize: source.displaySize
+            displaySize: source.displaySize,
+            projectionMode: projectionMode
         )
-        print(
-            String(
-                format: "Virtual screen: %.2f m × %.2f m at %.1f m in LOCAL space",
-                renderer.geometry.widthMeters,
-                renderer.geometry.heightMeters,
-                -renderer.geometry.center.z
+        if projectionMode == .flat {
+            print(
+                String(
+                    format: "Virtual screen: %.2f m × %.2f m at %.1f m in LOCAL space",
+                    renderer.geometry.widthMeters,
+                    renderer.geometry.heightMeters,
+                    -renderer.geometry.center.z
+                )
             )
-        )
-        print("Audio follows the current macOS output device")
+        } else {
+            print("Immersive scene will anchor to initial headset gaze")
+        }
+
+        let controller = VideoControllerInput()
 
         try await waitForSessionToRun(session)
 
@@ -98,15 +117,18 @@ struct SwiftXRVideoPlayer {
             return
         }
 
-        source.play()
-        print("OpenXR session running; AVPlayer playback started")
+        try startPlayback(source: source, ambisonic: ambisonic)
+        print("OpenXR session running; playback started")
+        print("Projection override: SWIFTXR_VIDEO_PROJECTION=flat|vr180|fisheye|eac360")
         print("Press Ctrl-C to stop")
 
         try renderVideo(
             session: session,
             swapchain: swapchain,
             source: source,
-            renderer: renderer
+            renderer: renderer,
+            controller: controller,
+            ambisonic: ambisonic
         )
     }
 
@@ -129,11 +151,28 @@ struct SwiftXRVideoPlayer {
     }
 
     @MainActor
+    private static func startPlayback(
+        source: VideoSource,
+        ambisonic: AmbisonicAudio?
+    ) throws {
+        if let ambisonic {
+            try ambisonic.startSynchronized(
+                videoPlayer: source.player,
+                mediaTimeSeconds: source.currentTimeSeconds
+            )
+        } else {
+            source.play()
+        }
+    }
+
+    @MainActor
     private static func renderVideo(
         session: XRSession,
         swapchain: XRSwapchain,
         source: VideoSource,
-        renderer: VideoRenderer
+        renderer: VideoRenderer,
+        controller: VideoControllerInput,
+        ambisonic: AmbisonicAudio?
     ) throws {
         var frameIndex = 0
         var decodedFrameCount = 0
@@ -142,7 +181,7 @@ struct SwiftXRVideoPlayer {
 
         while session.isRunning && !session.shouldExit {
             // Match the working GAV OpenXR player: keep Foundation/AppKit media
-            // delivery alive even though xrWaitFrame drives a synchronous loop.
+            // and GameController delivery alive while xrWaitFrame drives the loop.
             _ = RunLoop.current.run(
                 mode: .default,
                 before: Date(timeIntervalSinceNow: 0)
@@ -163,6 +202,14 @@ struct SwiftXRVideoPlayer {
                 )
             }
 
+            let controls = controller.poll()
+            try applyControls(
+                controls,
+                source: source,
+                renderer: renderer,
+                ambisonic: ambisonic
+            )
+
             let videoFrame = try source.latestFrame()
             if let videoFrame, videoFrame.itemTime != lastFrameTime {
                 decodedFrameCount += 1
@@ -178,6 +225,15 @@ struct SwiftXRVideoPlayer {
                     swapchainTexture: texture,
                     videoTexture: videoFrame?.texture,
                     commandBuffer: commandBuffer
+                )
+            }
+
+            if let ambisonic,
+               frame.trackingState.orientationValid,
+               let view = frame.views.first {
+                ambisonic.updateHeadOrientation(
+                    from: view,
+                    sceneAnchor: renderer.sceneAnchor
                 )
             }
 
@@ -215,6 +271,69 @@ struct SwiftXRVideoPlayer {
         }
 
         source.pause()
+        ambisonic?.pause()
         print("Rendered \(frameIndex) XR frames using \(decodedFrameCount) decoded video frames")
+    }
+
+    @MainActor
+    private static func applyControls(
+        _ controls: VideoControllerSnapshot,
+        source: VideoSource,
+        renderer: VideoRenderer,
+        ambisonic: AmbisonicAudio?
+    ) throws {
+        if controls.togglePlay {
+            if source.isPlaying {
+                source.pause()
+                ambisonic?.pause()
+                print("[controller] pause")
+            } else {
+                try startPlayback(source: source, ambisonic: ambisonic)
+                print("[controller] play")
+            }
+        }
+
+        if controls.seekSteps != 0 {
+            let delta = Double(controls.seekSteps) * 15
+            if let ambisonic, source.isPlaying {
+                var target = max(0, source.currentTimeSeconds + delta)
+                if let duration = source.durationSeconds {
+                    target = min(target, duration)
+                }
+                try ambisonic.startSynchronized(
+                    videoPlayer: source.player,
+                    mediaTimeSeconds: target
+                )
+            } else {
+                source.seek(by: delta)
+            }
+            print(String(format: "[controller] seek %+.0fs", delta))
+        }
+
+        if controls.volumeSteps != 0 {
+            source.adjustVolume(by: Float(controls.volumeSteps) * 0.05)
+            ambisonic?.setVolume(source.volume)
+            print(String(format: "[controller] volume %.0f%%", source.volume * 100))
+        }
+
+        if controls.recenter {
+            renderer.recenter()
+            print("[controller] recenter")
+        }
+
+        let stickX = stickAfterDeadZone(controls.rightX)
+        let stickY = stickAfterDeadZone(controls.rightY)
+        if stickX != 0 || stickY != 0 {
+            let yaw = stickX * abs(stickX) * 0.010
+            let pitch = -stickY * abs(stickY) * 0.010
+            renderer.tilt(yawRadians: yaw, pitchRadians: pitch)
+        }
+    }
+
+    private static func stickAfterDeadZone(_ value: Float) -> Float {
+        let deadZone: Float = 0.18
+        guard abs(value) > deadZone else { return 0 }
+        let scaled = (abs(value) - deadZone) / (1 - deadZone)
+        return value.sign == .minus ? -scaled : scaled
     }
 }
