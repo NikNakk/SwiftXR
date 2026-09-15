@@ -4,7 +4,11 @@ import PackageDescription
 
 let openXRExecutableLinkerSettings: [LinkerSetting] = [
     .unsafeFlags(
-        ["-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib"],
+        [
+            "-L/usr/local/lib",
+            "-Xlinker", "-rpath",
+            "-Xlinker", "/usr/local/lib",
+        ],
         .when(platforms: [.macOS])
     )
 ]
