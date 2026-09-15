@@ -135,6 +135,14 @@ final class XRSwiftUIHost<Content: View> {
     }
 
     private func prepareForInteraction() {
+        // The synthetic mouse stream is addressed to this hidden window. Keep it
+        // genuinely key so AppKit/SwiftUI sees active controls immediately,
+        // rather than relying on a later Cmd-Tab activation cycle to establish
+        // the responder hierarchy. Physical capture overlays are deliberately
+        // non-key windows, so they do not displace it.
+        if !window.isKeyWindow {
+            window.makeKeyAndOrderFront(nil)
+        }
         if window.firstResponder !== hostingView {
             window.makeFirstResponder(hostingView)
         }
