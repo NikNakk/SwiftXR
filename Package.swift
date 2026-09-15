@@ -62,6 +62,7 @@ let package = Package(
             name: "VirtualDesktopExample",
             dependencies: ["SwiftXR"],
             path: "Examples/VirtualDesktop",
+            exclude: ["README.md"],
             linkerSettings: openXRExecutableLinkerSettings
         ),
     ]
