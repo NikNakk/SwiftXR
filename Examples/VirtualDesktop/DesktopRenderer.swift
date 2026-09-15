@@ -1,6 +1,14 @@
+import CoreGraphics
 import Metal
 import simd
 import SwiftXR
+
+struct DesktopSurfaceHit {
+    let distance: Float
+    let worldPosition: SIMD3<Float>
+    let uv: SIMD2<Float>
+    let pixel: SIMD2<Float>
+}
 
 struct DesktopSurfaceGeometry {
     var center = SIMD3<Float>(0, 0, -2.0)
@@ -33,6 +41,46 @@ struct DesktopSurfaceGeometry {
         let x = center.x + (uv.x - 0.5) * widthMeters
         let y = center.y + (0.5 - uv.y) * heightMeters
         return SIMD3<Float>(x, y, center.z)
+    }
+
+    /// Intersect a LOCAL-space ray with the virtual desktop plane. This is the
+    /// geometry needed for a future Sense-controller laser pointer: callers get
+    /// top-left-origin UV and captured-pixel coordinates without knowing how the
+    /// desktop quad is rendered.
+    func hitTest(
+        rayOrigin: SIMD3<Float>,
+        rayDirection: SIMD3<Float>
+    ) -> DesktopSurfaceHit? {
+        guard abs(rayDirection.z) > 0.000_001 else { return nil }
+
+        let distance = (center.z - rayOrigin.z) / rayDirection.z
+        guard distance >= 0 else { return nil }
+
+        let world = rayOrigin + rayDirection * distance
+        let halfWidth = widthMeters * 0.5
+        let halfHeight = heightMeters * 0.5
+        let localX = world.x - center.x
+        let localY = world.y - center.y
+
+        guard
+            localX >= -halfWidth,
+            localX <= halfWidth,
+            localY >= -halfHeight,
+            localY <= halfHeight
+        else {
+            return nil
+        }
+
+        let uv = SIMD2<Float>(
+            localX / widthMeters + 0.5,
+            0.5 - localY / heightMeters
+        )
+        return DesktopSurfaceHit(
+            distance: distance,
+            worldPosition: world,
+            uv: uv,
+            pixel: pixelCoordinate(forUV: uv)
+        )
     }
 }
 
@@ -135,10 +183,11 @@ final class DesktopRenderer {
             ),
         ]
 
-        let buffer = vertices.withUnsafeBytes { bytes in
-            device.makeBuffer(
-                bytes: bytes.baseAddress!,
-                length: bytes.count,
+        let buffer = vertices.withUnsafeBufferPointer { pointer -> (any MTLBuffer)? in
+            guard let baseAddress = pointer.baseAddress else { return nil }
+            return device.makeBuffer(
+                bytes: baseAddress,
+                length: pointer.count * MemoryLayout<DesktopVertex>.stride,
                 options: []
             )
         }
@@ -190,28 +239,32 @@ final class DesktopRenderer {
                     zfar: 1
                 )
             )
-            encoder.setRenderPipelineState(pipelineState)
-            encoder.setCullMode(.none)
 
-            var uniforms = DesktopUniforms(
-                viewProjection: frame.views[eye].viewProjectionMatrix(
-                    nearZ: 0.05,
-                    farZ: 50
+            if let desktopTexture {
+                encoder.setRenderPipelineState(pipelineState)
+                encoder.setCullMode(.none)
+
+                var uniforms = DesktopUniforms(
+                    viewProjection: frame.views[eye].viewProjectionMatrix(
+                        nearZ: 0.05,
+                        farZ: 50
+                    )
                 )
-            )
-            encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-            encoder.setVertexBytes(
-                &uniforms,
-                length: MemoryLayout<DesktopUniforms>.stride,
-                index: 1
-            )
-            encoder.setFragmentTexture(desktopTexture, index: 0)
-            encoder.setFragmentSamplerState(samplerState, index: 0)
-            encoder.drawPrimitives(
-                type: .triangleStrip,
-                vertexStart: 0,
-                vertexCount: 4
-            )
+                encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+                encoder.setVertexBytes(
+                    &uniforms,
+                    length: MemoryLayout<DesktopUniforms>.stride,
+                    index: 1
+                )
+                encoder.setFragmentTexture(desktopTexture, index: 0)
+                encoder.setFragmentSamplerState(samplerState, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangleStrip,
+                    vertexStart: 0,
+                    vertexCount: 4
+                )
+            }
+
             encoder.endEncoding()
         }
     }
@@ -251,9 +304,6 @@ final class DesktopRenderer {
         texture2d<float> desktop [[texture(0)]],
         sampler desktopSampler [[sampler(0)]])
     {
-        if (desktop.get_width() == 0 || desktop.get_height() == 0) {
-            return float4(0.08, 0.09, 0.11, 1.0);
-        }
         return desktop.sample(desktopSampler, input.uv);
     }
     """
