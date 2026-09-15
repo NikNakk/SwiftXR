@@ -3,10 +3,13 @@ import CoreGraphics
 import simd
 
 public enum XRMacPointerCaptureError: Error, CustomStringConvertible {
+    case applicationActivationFailed
     case mouseCursorDisassociationFailed(CGError)
 
     public var description: String {
         switch self {
+        case .applicationActivationFailed:
+            return "SwiftXR could not become the active foreground macOS application for pointer capture"
         case let .mouseCursorDisassociationFailed(error):
             return "Could not disassociate the macOS mouse from the system cursor (CGError \(error.rawValue))"
         }
@@ -78,11 +81,30 @@ public final class XRMacPointerCapture: NSObject {
 
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
+
+        // Swift Package executable examples do not enter NSApplicationMain.
+        // Complete AppKit's launch sequence explicitly so activation, key-window
+        // delivery and local event monitors behave like a normal foreground app.
+        if !application.isRunning {
+            application.finishLaunching()
+        }
+
         application.activate(ignoringOtherApps: true)
 
-        if application.isActive {
-            try acquirePhysicalCapture()
+        let activationDeadline = Date().addingTimeInterval(0.5)
+        while !application.isActive && Date() < activationDeadline {
+            RunLoop.main.run(
+                mode: .default,
+                before: Date().addingTimeInterval(0.005)
+            )
         }
+
+        guard application.isActive else {
+            isCaptureRequested = false
+            throw XRMacPointerCaptureError.applicationActivationFailed
+        }
+
+        try acquirePhysicalCapture()
     }
 
     /// Stop capture and return the pointing device to normal macOS behavior.
@@ -106,7 +128,7 @@ public final class XRMacPointerCapture: NSObject {
 
     @objc
     private func applicationDidBecomeActive() {
-        guard isCaptureRequested else { return }
+        guard isCaptureRequested, !isCaptured else { return }
         try? acquirePhysicalCapture()
     }
 
@@ -256,9 +278,6 @@ public final class XRMacPointerCapture: NSObject {
             return true
 
         case .otherMouseDown, .otherMouseUp:
-            // Do not let auxiliary buttons leak through to desktop applications
-            // while the mouse is owned by XR, even though SwiftXR does not yet
-            // assign them a panel semantic.
             return true
 
         case .scrollWheel:
@@ -276,8 +295,6 @@ public final class XRMacPointerCapture: NSObject {
             return true
 
         case .keyDown:
-            // Keyboard input is not part of pointer capture. In particular this
-            // lets normal system/app shortcuts such as Cmd-Tab continue to work.
             return false
 
         default:
