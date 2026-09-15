@@ -3,19 +3,29 @@ import AppKit
 import Foundation
 
 @MainActor
+private final class HiddenYouTubeBrowserWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
 final class YouTubeBrowserController: NSObject {
-    private static let width: CGFloat = 1024
-    private static let height: CGFloat = 512
-    private static let snapshotInterval: TimeInterval = 0.10
+    static let width: CGFloat = 1280
+    static let height: CGFloat = 720
+
+    private static let snapshotInterval: TimeInterval = 1.0 / 30.0
+    private static let scrollScale: Double = 650
 
     private let webView: WKWebView
-    private let window: NSWindow
+    private let window: HiddenYouTubeBrowserWindow
     private var loaded = false
     private var snapshotPending = false
     private var needsSnapshot = true
     private var lastSnapshot = Date.distantPast
     private var textInputFocused = false
     private var isShutdown = false
+    private var pendingScrollY: Double = 0
+    private var scrollEvaluationPending = false
 
     var onSnapshot: ((NSImage?) -> Void)?
     var onLaunchURL: ((String) -> Void)?
@@ -36,15 +46,30 @@ final class YouTubeBrowserController: NSObject {
         )
         webView.allowsMagnification = false
 
-        window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: Self.width, height: Self.height),
-            styleMask: [.titled],
+        window = HiddenYouTubeBrowserWindow(
+            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.height),
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.collectionBehavior = [.transient, .ignoresCycle]
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.alphaValue = 0.001
+        window.collectionBehavior = [.transient, .ignoresCycle, .stationary]
         window.contentView = webView
+
+        let screens = NSScreen.screens
+        let minX = screens.map(\.frame.minX).min() ?? 0
+        let minY = screens.map(\.frame.minY).min() ?? 0
+        window.setFrameOrigin(
+            NSPoint(
+                x: minX - Self.width - 4096,
+                y: minY - Self.height - 4096
+            )
+        )
 
         super.init()
 
@@ -57,7 +82,7 @@ final class YouTubeBrowserController: NSObject {
             )
         )
         webView.navigationDelegate = self
-        window.orderFront(nil)
+        window.orderFrontRegardless()
     }
 
     /// Break WebKit's strong script-message-handler ownership before the player
@@ -73,7 +98,7 @@ final class YouTubeBrowserController: NSObject {
 
     func open() {
         guard !isShutdown else { return }
-        window.orderFront(nil)
+        window.orderFrontRegardless()
         needsSnapshot = true
         onStatus?("Loading YouTube VR…")
 
@@ -88,11 +113,16 @@ final class YouTubeBrowserController: NSObject {
 
     func close() {
         textInputFocused = false
+        pendingScrollY = 0
         window.orderOut(nil)
     }
 
     func tick() {
-        guard !isShutdown, !snapshotPending else { return }
+        guard !isShutdown else { return }
+
+        flushPendingScrollIfNeeded()
+        guard !snapshotPending, !scrollEvaluationPending else { return }
+
         let now = Date()
         guard needsSnapshot || now.timeIntervalSince(lastSnapshot) >= Self.snapshotInterval else {
             return
@@ -117,6 +147,9 @@ final class YouTubeBrowserController: NSObject {
 
     func pointerMoved() {
         if textInputFocused {
+            // XRSwiftUIHost legitimately makes its hidden window key while it
+            // synthesizes the pointer event. Restore WebKit immediately so the
+            // next physical key press still goes to the focused YouTube field.
             maintainKeyboardFocus()
         }
     }
@@ -127,13 +160,49 @@ final class YouTubeBrowserController: NSObject {
         let v = min(max(Double(normalizedPoint.y), 0), 1)
         let x = u * Double(Self.width)
         let y = v * Double(Self.height)
+
+        // Make WebKit's window key before asking JavaScript to focus a text
+        // control. Doing this in the opposite order leaves the DOM focused but
+        // does not reliably establish the native WebKit text-input responder.
+        maintainKeyboardFocus()
+
         let script = """
         (() => {
-          const e = document.elementFromPoint(\(String(format: "%.1f", x)), \(String(format: "%.1f", y)));
-          if (!e) return '';
-          if (e.focus) e.focus();
+          const x = \(String(format: "%.1f", x));
+          const y = \(String(format: "%.1f", y));
+
+          const deepElementFromPoint = (root, px, py) => {
+            let e = root.elementFromPoint ? root.elementFromPoint(px, py) : null;
+            let visited = new Set();
+            while (e && e.shadowRoot && !visited.has(e)) {
+              visited.add(e);
+              const inner = e.shadowRoot.elementFromPoint
+                ? e.shadowRoot.elementFromPoint(px, py)
+                : null;
+              if (!inner || inner === e) break;
+              e = inner;
+            }
+            return e;
+          };
+
+          let e = deepElementFromPoint(document, x, y);
+          if (!e) return { kind: 'none', tag: '' };
+
+          let editable = null;
+          if (e.matches && e.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) {
+            editable = e;
+          } else if (e.closest) {
+            editable = e.closest('input, textarea, [contenteditable="true"], [role="textbox"]');
+          }
+
+          if (editable) {
+            try { editable.focus({preventScroll: true}); } catch (_) { editable.focus(); }
+            editable.click();
+            return { kind: 'editable', tag: (editable.tagName || '').toLowerCase() };
+          }
+
           e.click();
-          return (e.tagName || '').toLowerCase();
+          return { kind: 'click', tag: (e.tagName || '').toLowerCase() };
         })()
         """
 
@@ -141,8 +210,8 @@ final class YouTubeBrowserController: NSObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.needsSnapshot = true
-                if let tag = result as? String,
-                   tag == "input" || tag == "textarea" {
+                if let result = result as? [String: Any],
+                   result["kind"] as? String == "editable" {
                     self.textInputFocused = true
                     self.maintainKeyboardFocus()
                     print("[youtube-ui] keyboard focus sent to YouTube search field")
@@ -155,11 +224,10 @@ final class YouTubeBrowserController: NSObject {
 
     func scroll(_ delta: SIMD2<Float>) {
         guard !isShutdown else { return }
-        let amount = -Double(delta.y) * 220
-        guard abs(amount) > 0.5 else { return }
-        let script = "window.scrollBy(0, \(String(format: "%.1f", amount)));"
-        webView.evaluateJavaScript(script, completionHandler: nil)
-        needsSnapshot = true
+        let amount = -Double(delta.y) * Self.scrollScale
+        guard abs(amount) > 0.25 else { return }
+        pendingScrollY = min(max(pendingScrollY + amount, -1600), 1600)
+        flushPendingScrollIfNeeded()
     }
 
     func back() -> Bool {
@@ -173,9 +241,31 @@ final class YouTubeBrowserController: NSObject {
         return false
     }
 
+    private func flushPendingScrollIfNeeded() {
+        guard !scrollEvaluationPending, abs(pendingScrollY) > 0.5 else { return }
+        let amount = min(max(pendingScrollY, -600), 600)
+        pendingScrollY -= amount
+        scrollEvaluationPending = true
+
+        let script = "window.scrollBy({left:0, top:\(String(format: "%.1f", amount)), behavior:'instant'});"
+        webView.evaluateJavaScript(script) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.scrollEvaluationPending = false
+                self.needsSnapshot = true
+                self.flushPendingScrollIfNeeded()
+            }
+        }
+    }
+
     private func maintainKeyboardFocus() {
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(webView)
+        window.orderFrontRegardless()
+        if !window.isKeyWindow {
+            window.makeKey()
+        }
+        if window.firstResponder !== webView {
+            window.makeFirstResponder(webView)
+        }
     }
 
     private static let injectionScript = #"""
