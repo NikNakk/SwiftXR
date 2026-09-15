@@ -153,7 +153,14 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        window.sendEvent(event)
+        switch type {
+        case .leftMouseDragged:
+            hostingView.mouseDragged(with: event)
+        case .rightMouseDragged:
+            hostingView.rightMouseDragged(with: event)
+        default:
+            hostingView.mouseMoved(with: event)
+        }
     }
 
     private func sendPointerButton(
@@ -185,7 +192,18 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        window.sendEvent(event)
+        switch type {
+        case .leftMouseDown:
+            hostingView.mouseDown(with: event)
+        case .leftMouseUp:
+            hostingView.mouseUp(with: event)
+        case .rightMouseDown:
+            hostingView.rightMouseDown(with: event)
+        case .rightMouseUp:
+            hostingView.rightMouseUp(with: event)
+        default:
+            break
+        }
     }
 
     private func sendScroll(
@@ -255,8 +273,8 @@ final class XRSwiftUIHost<Content: View> {
         }
 
         window.makeFirstResponder(hostingView)
-        window.sendEvent(down)
-        window.sendEvent(up)
+        hostingView.keyDown(with: down)
+        hostingView.keyUp(with: up)
     }
 
     private func windowPoint(for normalizedPosition: SIMD2<Float>) -> NSPoint {
