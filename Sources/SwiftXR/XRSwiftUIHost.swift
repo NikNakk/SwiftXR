@@ -7,38 +7,15 @@ private final class XRSwiftUIHostingWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
-/// A desktop-sized view that explicitly owns mouse hit-testing while the real
-/// macOS pointer is being used to drive an XR SwiftUI panel. The view is
-/// visually transparent, but it must not allow clicks to reach Finder, Safari,
-/// or another application underneath the SwiftXR capture surface.
-private final class XRMouseCaptureContainerView: NSView {
-    override var acceptsFirstResponder: Bool { true }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else { return nil }
-        return super.hitTest(point) ?? self
-    }
-}
-
 @MainActor
 final class XRSwiftUIHost<Content: View> {
     let pointSize: CGSize
     let scale: CGFloat
 
     private let window: XRSwiftUIHostingWindow
-    private let containerView: XRMouseCaptureContainerView
     private let hostingView: NSHostingView<Content>
-
-    // Device-neutral semantic-pointer state. The real macOS mouse path bypasses
-    // this and lets AppKit deliver genuine events to NSHostingView.
     private var pressedButtons: Set<XRPanelPointerButton> = []
-    private var pendingAccessibilityButton = false
-    private var isRealMouseSurfaceActive = false
-    private var savedRealMousePosition: CGPoint?
+    private var nextMouseEventNumber = 1
 
     init(
         pointSize: CGSize,
@@ -54,14 +31,8 @@ final class XRSwiftUIHost<Content: View> {
         let hostingView = NSHostingView(rootView: content)
         hostingView.frame = frame
         hostingView.bounds = frame
-        hostingView.autoresizingMask = []
+        hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
-
-        let containerView = XRMouseCaptureContainerView(frame: frame)
-        containerView.autoresizingMask = [.width, .height]
-        containerView.wantsLayer = true
-        containerView.layer?.backgroundColor = NSColor.clear.cgColor
-        containerView.addSubview(hostingView)
 
         let window = XRSwiftUIHostingWindow(
             contentRect: frame,
@@ -75,13 +46,16 @@ final class XRSwiftUIHost<Content: View> {
         window.hasShadow = false
         window.acceptsMouseMovedEvents = true
         window.ignoresMouseEvents = false
-        window.contentView = containerView
+        window.contentView = hostingView
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.makeFirstResponder(hostingView)
+
+        // Keep a genuine AppKit responder/window hierarchy alive, but never put
+        // the SwiftUI panel on the user's visible desktop. Mouse events are
+        // queued explicitly with this window number by `handle(...)` below.
         window.orderFront(nil)
 
         self.window = window
-        self.containerView = containerView
         self.hostingView = hostingView
     }
 
@@ -89,10 +63,9 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        // Use AppKit's own caching representation. This is the path that gave us
-        // correct full-panel rendering before the real-mouse experiment. An
-        // explicitly allocated pointSize*scale bitmap caused cacheDisplay() to
-        // fill only one quadrant on Retina/2x panels.
+        // Let AppKit select the correct backing resolution. Explicitly creating
+        // a pointSize*scale bitmap made cacheDisplay() fill only one quadrant on
+        // Retina displays.
         guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(
             in: hostingView.bounds
         ) else {
@@ -108,139 +81,13 @@ final class XRSwiftUIHost<Content: View> {
         return image
     }
 
-    // MARK: - Real macOS mouse surface
-
-    /// Put the real hosted SwiftUI hierarchy inside an invisible desktop-sized
-    /// interaction window without scaling the hosting view itself. The window
-    /// owns the whole desktop for hit-testing, while the native-size child view
-    /// receives ordinary AppKit events whenever the hidden real pointer is over
-    /// the panel.
-    func beginRealMouseCaptureSurface() {
-        guard !isRealMouseSurfaceActive else {
-            prepareForInteraction()
-            return
-        }
-
-        let screens = NSScreen.screens
-        guard let first = screens.first else {
-            prepareForInteraction()
-            return
-        }
-
-        savedRealMousePosition = CGEvent(source: nil)?.location
-
-        let desktopFrame = screens.dropFirst().reduce(first.frame) { partial, screen in
-            partial.union(screen.frame)
-        }
-
-        isRealMouseSurfaceActive = true
-        window.collectionBehavior = [
-            .canJoinAllSpaces,
-            .fullScreenAuxiliary,
-            .stationary,
-            .ignoresCycle,
-        ]
-        window.level = .screenSaver
-
-        // Keep the NSWindow itself fully present in the window server. The
-        // content remains visually transparent, but we do not use a tiny
-        // window-level alpha because that can make pointer ownership ambiguous.
-        window.alphaValue = 1
-        window.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.0001)
-        window.setFrame(desktopFrame, display: false)
-
-        // Crucially, do not stretch NSHostingView to the desktop and then alter
-        // its bounds. Keep it exactly panel-sized and put it around the current
-        // real cursor instead.
-        let mouseInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-        let bounds = containerView.bounds
-        let maxX = max(bounds.minX, bounds.maxX - pointSize.width)
-        let maxY = max(bounds.minY, bounds.maxY - pointSize.height)
-        let origin = NSPoint(
-            x: min(max(mouseInWindow.x - pointSize.width / 2, bounds.minX), maxX),
-            y: min(max(mouseInWindow.y - pointSize.height / 2, bounds.minY), maxY)
-        )
-        hostingView.frame = NSRect(origin: origin, size: pointSize)
-        hostingView.bounds = NSRect(origin: .zero, size: pointSize)
-
-        window.orderFrontRegardless()
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(hostingView)
-    }
-
-    func endRealMouseCaptureSurface() {
-        guard isRealMouseSurfaceActive else { return }
-        isRealMouseSurfaceActive = false
-
-        hostingView.frame = NSRect(origin: .zero, size: pointSize)
-        hostingView.bounds = NSRect(origin: .zero, size: pointSize)
-
-        window.backgroundColor = .clear
-        window.alphaValue = 1
-        window.level = .normal
-        window.collectionBehavior = []
-        window.setFrame(
-            NSRect(origin: NSPoint(x: -20_000, y: -20_000), size: pointSize),
-            display: false
-        )
-        window.orderFront(nil)
-
-        // XRMacPointerCapture calls this before NSCursor.unhide(), so restore the
-        // user's original desktop cursor location while the real pointer is still
-        // invisible. The physical display therefore never shows the confinement
-        // or restoration warp.
-        if let savedRealMousePosition {
-            CGWarpMouseCursorPosition(savedRealMousePosition)
-            self.savedRealMousePosition = nil
-        }
-    }
-
-    /// Current real macOS cursor position expressed in SwiftXR's normalized
-    /// top-left panel coordinates. If the pointer leaves the native-size child
-    /// view, move the associated system cursor back to its nearest edge. We do
-    /// not manufacture or retarget NSEvents: events within the panel are the
-    /// ordinary AppKit events generated by the physical mouse/trackpad.
-    func realMousePointerPosition() -> SIMD2<Float>? {
-        guard isRealMouseSurfaceActive else { return nil }
-
-        let pointInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-        let panelFrame = hostingView.frame
-        let inset: CGFloat = 1
-        let clamped = NSPoint(
-            x: min(max(pointInWindow.x, panelFrame.minX + inset), panelFrame.maxX - inset),
-            y: min(max(pointInWindow.y, panelFrame.minY + inset), panelFrame.maxY - inset)
-        )
-
-        if abs(clamped.x - pointInWindow.x) > 0.001 ||
-            abs(clamped.y - pointInWindow.y) > 0.001,
-           let cgLocation = CGEvent(source: nil)?.location {
-            let dx = clamped.x - pointInWindow.x
-            let dy = clamped.y - pointInWindow.y
-            CGWarpMouseCursorPosition(
-                CGPoint(x: cgLocation.x + dx, y: cgLocation.y - dy)
-            )
-        }
-
-        let pointInHost = hostingView.convert(clamped, from: nil)
-        let width = max(hostingView.bounds.width, 1)
-        let height = max(hostingView.bounds.height, 1)
-
-        let x = Float(pointInHost.x / width)
-        let y: Float
-        if hostingView.isFlipped {
-            y = Float(pointInHost.y / height)
-        } else {
-            y = Float(1 - pointInHost.y / height)
-        }
-
-        return SIMD2(
-            min(max(x, 0), 1),
-            min(max(y, 0), 1)
-        )
-    }
-
-    // MARK: - Device-neutral semantic path
-
+    /// Translate SwiftXR's device-neutral panel interaction into a coherent
+    /// AppKit mouse stream addressed to this off-screen hosting window.
+    ///
+    /// Mouse events are posted through NSApplication rather than sent directly
+    /// to NSWindow. This matters for native controls such as NSSlider/SwiftUI
+    /// Slider: their nested AppKit tracking loop can dequeue the subsequent
+    /// dragged/up events normally.
     func handle(
         _ event: XRPanelInteractionEvent,
         pointerPosition: SIMD2<Float>?
@@ -267,19 +114,19 @@ final class XRSwiftUIHost<Content: View> {
 
         case .pointerMoved, .pointerMovedBy:
             guard let pointerPosition else { return }
-            sendPointerMove(to: pointerPosition)
+            postPointerMove(to: pointerPosition)
 
         case .pointerExited:
-            pendingAccessibilityButton = false
+            break
 
         case let .pointerDown(button):
             guard let pointerPosition else { return }
             pressedButtons.insert(button)
-            sendPointerButton(button, down: true, at: pointerPosition)
+            postPointerButton(button, down: true, at: pointerPosition)
 
         case let .pointerUp(button):
             guard let pointerPosition else { return }
-            sendPointerButton(button, down: false, at: pointerPosition)
+            postPointerButton(button, down: false, at: pointerPosition)
             pressedButtons.remove(button)
 
         case let .scroll(delta):
@@ -288,24 +135,15 @@ final class XRSwiftUIHost<Content: View> {
     }
 
     private func prepareForInteraction() {
-        if !window.isKeyWindow {
-            window.makeKey()
-        }
         if window.firstResponder !== hostingView {
             window.makeFirstResponder(hostingView)
         }
     }
 
-    private func sendPointerMove(to normalizedPosition: SIMD2<Float>) {
+    private func postPointerMove(to normalizedPosition: SIMD2<Float>) {
         prepareForInteraction()
 
-        if pendingAccessibilityButton && pressedButtons.contains(.primary) {
-            return
-        }
-
-        let point = windowPoint(for: normalizedPosition)
         let type: NSEvent.EventType
-
         if pressedButtons.contains(.primary) {
             type = .leftMouseDragged
         } else if pressedButtons.contains(.secondary) {
@@ -314,48 +152,29 @@ final class XRSwiftUIHost<Content: View> {
             type = .mouseMoved
         }
 
-        guard let event = NSEvent.mouseEvent(
-            with: type,
-            location: point,
-            modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 0,
+        guard let event = makeMouseEvent(
+            type: type,
+            at: normalizedPosition,
             clickCount: pressedButtons.isEmpty ? 0 : 1,
             pressure: pressedButtons.isEmpty ? 0 : 1
         ) else {
             return
         }
 
-        window.sendEvent(event)
+        // Append rather than prepend. If several events are generated before
+        // AppKit drains the queue, mouseDown -> dragged -> mouseUp ordering is
+        // therefore preserved.
+        NSApplication.shared.postEvent(event, atStart: false)
     }
 
-    private func sendPointerButton(
+    private func postPointerButton(
         _ button: XRPanelPointerButton,
         down: Bool,
         at normalizedPosition: SIMD2<Float>
     ) {
         prepareForInteraction()
 
-        if button == .primary {
-            if down {
-                if accessibilityButton(at: normalizedPosition) != nil {
-                    pendingAccessibilityButton = true
-                    return
-                }
-            } else if pendingAccessibilityButton {
-                pendingAccessibilityButton = false
-                if let releaseButton = accessibilityButton(at: normalizedPosition) {
-                    _ = releaseButton.accessibilityPerformPress()
-                }
-                return
-            }
-        }
-
-        let point = windowPoint(for: normalizedPosition)
         let type: NSEvent.EventType
-
         switch (button, down) {
         case (.primary, true): type = .leftMouseDown
         case (.primary, false): type = .leftMouseUp
@@ -363,38 +182,38 @@ final class XRSwiftUIHost<Content: View> {
         case (.secondary, false): type = .rightMouseUp
         }
 
-        guard let event = NSEvent.mouseEvent(
-            with: type,
-            location: point,
-            modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 0,
+        guard let event = makeMouseEvent(
+            type: type,
+            at: normalizedPosition,
             clickCount: 1,
             pressure: down ? 1 : 0
         ) else {
             return
         }
 
-        window.sendEvent(event)
+        NSApplication.shared.postEvent(event, atStart: false)
     }
 
-    private func accessibilityButton(
-        at normalizedPosition: SIMD2<Float>
-    ) -> (any NSAccessibilityProtocol)? {
-        let pointInWindow = windowPoint(for: normalizedPosition)
-        let pointOnScreen = window.convertPoint(toScreen: pointInWindow)
+    private func makeMouseEvent(
+        type: NSEvent.EventType,
+        at normalizedPosition: SIMD2<Float>,
+        clickCount: Int,
+        pressure: Float
+    ) -> NSEvent? {
+        let eventNumber = nextMouseEventNumber
+        nextMouseEventNumber &+= 1
 
-        guard
-            let hit = hostingView.accessibilityHitTest(pointOnScreen),
-            let accessible = hit as? any NSAccessibilityProtocol,
-            accessible.accessibilityRole() == .button
-        else {
-            return nil
-        }
-
-        return accessible
+        return NSEvent.mouseEvent(
+            with: type,
+            location: windowPoint(for: normalizedPosition),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: eventNumber,
+            clickCount: clickCount,
+            pressure: pressure
+        )
     }
 
     private func sendScroll(
@@ -426,6 +245,9 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
+        // NSEvent has no public scroll-event factory that lets us assign a
+        // windowNumber. Deliver scrolling directly to the known host window;
+        // unlike mouse dragging it does not depend on a nested tracking loop.
         window.sendEvent(event)
     }
 
@@ -467,8 +289,8 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        window.sendEvent(down)
-        window.sendEvent(up)
+        NSApplication.shared.postEvent(down, atStart: false)
+        NSApplication.shared.postEvent(up, atStart: false)
     }
 
     private func windowPoint(for normalizedPosition: SIMD2<Float>) -> NSPoint {
