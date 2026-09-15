@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import simd
 import SwiftXR
@@ -13,9 +14,9 @@ enum VideoProjectionMode: Int32, CaseIterable, CustomStringConvertible {
         case .flat:
             return "flat virtual screen"
         case .vr180Equirect:
-            return "SBS VR180 half-equirectangular"
+            return "VR180 half-equirectangular"
         case .vr180Fisheye:
-            return "SBS VR180 equidistant fisheye"
+            return "VR180 equidistant fisheye"
         case .eac360:
             return "YouTube/FFmpeg EAC 360"
         }
@@ -52,10 +53,95 @@ enum VideoProjectionMode: Int32, CaseIterable, CustomStringConvertible {
         if name.contains("fisheye") {
             return .vr180Fisheye
         }
-        if name.contains("vr180") || name.contains("180") || name.contains("sbs") {
+        if name.contains("vr180") || name.contains("180") || name.contains("sbs") ||
+            name.contains("topbottom") || name.contains("overunder") {
             return .vr180Equirect
         }
         return .flat
+    }
+}
+
+enum VideoStereoLayout: Int32, CaseIterable, CustomStringConvertible {
+    case mono = 0
+    case sideBySide = 1
+    case topBottom = 2
+
+    var description: String {
+        switch self {
+        case .mono:
+            return "mono"
+        case .sideBySide:
+            return "stereo SBS"
+        case .topBottom:
+            return "stereo top/bottom"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .mono: return "Mono"
+        case .sideBySide: return "SBS"
+        case .topBottom: return "Top/Bottom"
+        }
+    }
+
+    static func resolve(
+        inputPath: String,
+        projectionMode: VideoProjectionMode,
+        displaySize: CGSize
+    ) -> VideoStereoLayout {
+        let environment = ProcessInfo.processInfo.environment
+        let value = environment["SWIFTXR_VIDEO_STEREO"]
+            ?? environment["GAV_MONADO_STEREO"]
+
+        if let value = value?.lowercased(), !value.isEmpty {
+            switch value {
+            case "mono", "2d":
+                return .mono
+            case "sbs", "lr", "left-right", "sidebyside", "side-by-side":
+                return .sideBySide
+            case "tb", "ou", "topbottom", "top-bottom", "overunder", "over-under":
+                return .topBottom
+            default:
+                fputs(
+                    "swiftxr-video: unknown stereo layout '\(value)'; using automatic detection\n",
+                    stderr
+                )
+            }
+        }
+
+        if projectionMode == .flat || projectionMode == .eac360 {
+            return .mono
+        }
+
+        let name = URL(fileURLWithPath: inputPath).lastPathComponent.uppercased()
+        if name.contains("_TB") || name.contains("OVERUNDER") ||
+            name.contains("_OU") || name.contains("TOPBOTTOM") ||
+            name.contains("TOP-BOTTOM") || name.contains("TOP_BOTTOM") {
+            return .topBottom
+        }
+        if name.contains("SBS") || name.contains("_LR") ||
+            name.contains("SIDEBYSIDE") || name.contains("SIDE-BY-SIDE") ||
+            name.contains("SIDE_BY_SIDE") {
+            return .sideBySide
+        }
+
+        // Most raw VR180 eye images are roughly square. A combined frame that is
+        // strongly portrait therefore almost certainly stacks the eyes vertically;
+        // a strongly landscape frame almost certainly places them side-by-side.
+        // Near-square files remain ambiguous and keep the historical SBS default;
+        // the in-headset controls allow an immediate manual switch.
+        let width = max(Double(displaySize.width), 1)
+        let height = max(Double(displaySize.height), 1)
+        let aspect = width / height
+        if aspect < 0.78 {
+            return .topBottom
+        }
+        if aspect > 1.28 {
+            return .sideBySide
+        }
+
+        return .sideBySide
     }
 }
 
