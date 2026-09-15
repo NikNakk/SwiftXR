@@ -3,23 +3,32 @@ import CoreGraphics
 import simd
 
 public enum XRMacPointerCaptureError: Error, CustomStringConvertible {
-    case applicationActivationFailed
+    case applicationNotActive
     case mouseCursorDisassociationFailed(CGError)
 
     public var description: String {
         switch self {
-        case .applicationActivationFailed:
-            return "SwiftXR could not become the active foreground macOS application for pointer capture"
+        case .applicationNotActive:
+            return "SwiftXR pointer capture requires a running, active foreground macOS application"
         case let .mouseCursorDisassociationFailed(error):
             return "Could not disassociate the macOS mouse from the system cursor (CGError \(error.rawValue))"
         }
     }
 }
 
+@MainActor
+private final class XRPointerCaptureWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 /// Exclusive mouse/trackpad capture for an XR panel on macOS.
 ///
+/// This class deliberately assumes a real AppKit application lifecycle. It does
+/// not try to promote a command-line process into a GUI application. Call
+/// `start()` only after `NSApplication` is running and active.
+///
 /// While capture is active SwiftXR:
-/// - makes the process a foreground AppKit application,
 /// - places transparent input windows over the attached Mac displays,
 /// - hides and disassociates the system cursor from the pointing device,
 /// - consumes mouse/button/scroll events before normal AppKit dispatch, and
@@ -71,47 +80,29 @@ public final class XRMacPointerCapture: NSObject {
         )
     }
 
-    /// Activate the application and begin exclusive relative-pointer capture.
+    /// Begin exclusive relative-pointer capture.
+    ///
+    /// The enclosing process must already be a running, active AppKit app. This
+    /// requirement is intentional: modern macOS treats activation as a
+    /// user-intent decision, so SwiftXR should not silently attempt to steal it.
     public func start() throws {
         guard !isCaptureRequested else { return }
+
+        let application = NSApplication.shared
+        guard application.isRunning, application.isActive else {
+            throw XRMacPointerCaptureError.applicationNotActive
+        }
 
         escapeRequested = false
         isCaptureRequested = true
         interaction.movePointer(to: SIMD2(0.5, 0.5))
-
-        let application = NSApplication.shared
-        application.setActivationPolicy(.regular)
-
-        // Swift Package executable examples do not enter NSApplicationMain.
-        // Complete AppKit's launch sequence explicitly so activation, key-window
-        // delivery and local event monitors behave like a normal foreground app.
-        if !application.isRunning {
-            application.finishLaunching()
-        }
-
-        application.activate(ignoringOtherApps: true)
-
-        let activationDeadline = Date().addingTimeInterval(0.5)
-        while !application.isActive && Date() < activationDeadline {
-            RunLoop.main.run(
-                mode: .default,
-                before: Date().addingTimeInterval(0.005)
-            )
-        }
-
-        guard application.isActive else {
-            isCaptureRequested = false
-            throw XRMacPointerCaptureError.applicationActivationFailed
-        }
-
         try acquirePhysicalCapture()
     }
 
     /// Stop capture and return the pointing device to normal macOS behavior.
     ///
-    /// Applications should pair every successful `start()` with `stop()`; the
-    /// SwiftUI sample does this with `defer`. Focus loss also releases the
-    /// physical capture automatically.
+    /// Applications should pair every successful `start()` with `stop()`. Focus
+    /// loss also releases the physical capture automatically.
     public func stop() {
         isCaptureRequested = false
         releasePhysicalCapture(restoreCursor: true)
@@ -134,6 +125,9 @@ public final class XRMacPointerCapture: NSObject {
 
     private func acquirePhysicalCapture() throws {
         guard isCaptureRequested, !isCaptured else { return }
+        guard NSApplication.shared.isActive else {
+            throw XRMacPointerCaptureError.applicationNotActive
+        }
 
         savedCursorPosition = CGEvent(source: nil)?.location
         createCaptureWindows()
@@ -179,7 +173,7 @@ public final class XRMacPointerCapture: NSObject {
         destroyCaptureWindows()
 
         captureWindows = NSScreen.screens.map { screen in
-            let window = NSWindow(
+            let window = XRPointerCaptureWindow(
                 contentRect: screen.frame,
                 styleMask: [.borderless],
                 backing: .buffered,
