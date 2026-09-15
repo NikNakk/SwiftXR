@@ -169,6 +169,45 @@ final class VideoSource {
         player.pause()
     }
 
+    func togglePlayback() {
+        if isPlaying {
+            pause()
+        } else {
+            play()
+        }
+    }
+
+    func seek(by seconds: Double) {
+        let target = max(0, currentTimeSeconds + seconds)
+        let bounded: Double
+        if let durationSeconds {
+            bounded = min(target, durationSeconds)
+        } else {
+            bounded = target
+        }
+        player.seek(
+            to: CMTime(seconds: bounded, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
+    func setVolume(_ newValue: Float) {
+        player.volume = min(max(newValue, 0), 1)
+    }
+
+    func adjustVolume(by delta: Float) {
+        setVolume(player.volume + delta)
+    }
+
+    var isPlaying: Bool {
+        player.rate != 0
+    }
+
+    var volume: Float {
+        player.volume
+    }
+
     var durationSeconds: Double? {
         let seconds = CMTimeGetSeconds(duration)
         return seconds.isFinite && seconds > 0 ? seconds : nil
