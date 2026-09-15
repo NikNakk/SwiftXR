@@ -4,14 +4,6 @@ import GameController
 import SwiftUI
 import SwiftXR
 
-/// Keep the AppKit principal class in the application executable itself. SwiftPM
-/// normally links SwiftXR as a library target, and AppKit resolves
-/// NSPrincipalClass before library-backed Swift classes are a reliable place to
-/// discover the application singleton class.
-@MainActor
-@objc(SwiftUIPanelApplication)
-private final class SwiftUIPanelApplication: XRMacApplication {}
-
 @MainActor
 private final class PanelModel: ObservableObject {
     @Published var playing = false
@@ -192,9 +184,6 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
             panelTexture: panel.texture
         )
 
-        // This initializer uses XRMacApplication.nextEvent(...) so native AppKit
-        // tracking semantics reach the hidden SwiftUI window even inside nested
-        // control-tracking loops (for example while dragging a Slider).
         let pointerCapture = XRMacPointerCapture(panel: panel)
 
         self.instance = instance
@@ -243,9 +232,6 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
 
-                // Native AppKit input marks the hosted SwiftUI surface dirty.
-                // Usually this is a no-op; during hover/press/drag it updates the
-                // retained Metal texture before the next XR frame is drawn.
                 try panel.refreshIfNeeded()
                 renderer.pointerPosition = panel.interaction.pointerPosition
 
@@ -317,6 +303,26 @@ private final class SwiftUIPanelAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// AppKit must instantiate the SwiftXR application subclass itself. Calling
+/// `NSApplication.shared` from `main()` would create the default NSApplication
+/// singleton before NSPrincipalClass is consulted, so install the delegate here
+/// and enter through NSApplicationMain instead.
+@MainActor
+@objc(SwiftUIPanelApplication)
+private final class SwiftUIPanelApplication: XRMacApplication {
+    private var retainedDelegate: SwiftUIPanelAppDelegate?
+
+    override func finishLaunching() {
+        setActivationPolicy(.regular)
+
+        let appDelegate = SwiftUIPanelAppDelegate()
+        retainedDelegate = appDelegate
+        delegate = appDelegate
+
+        super.finishLaunching()
+    }
+}
+
 @main
 struct SwiftUIPanelExample {
     @MainActor
@@ -330,12 +336,9 @@ struct SwiftUIPanelExample {
             _ = FileManager.default.changeCurrentDirectoryPath(originalDirectory)
         }
 
-        let application = NSApplication.shared
-        application.setActivationPolicy(.regular)
-
-        let delegate = SwiftUIPanelAppDelegate()
-        application.delegate = delegate
-        application.run()
+        // Let AppKit read NSPrincipalClass and construct SwiftUIPanelApplication.
+        // Do not touch NSApplication.shared before this call.
+        _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
     }
 
     private static func relaunchThroughLaunchServices() throws {
@@ -379,6 +382,7 @@ struct SwiftUIPanelExample {
         }
         launchEnvironment["SWIFTXR_ORIGINAL_CWD"] = fileManager.currentDirectoryPath
 
+        let principalClassName = NSStringFromClass(SwiftUIPanelApplication.self)
         let infoPlist: [String: Any] = [
             "CFBundleDevelopmentRegion": "en",
             "CFBundleDisplayName": "SwiftXR SwiftUI Panel",
@@ -391,7 +395,7 @@ struct SwiftUIPanelExample {
             "CFBundleVersion": "1",
             "LSMinimumSystemVersion": "14.0",
             "NSHighResolutionCapable": true,
-            "NSPrincipalClass": "SwiftUIPanelApplication",
+            "NSPrincipalClass": principalClassName,
             "LSEnvironment": launchEnvironment,
         ]
 
