@@ -54,20 +54,12 @@ final class XRSwiftUIHost<Content: View> {
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        let pixelsWide = max(1, Int((pointSize.width * scale).rounded(.up)))
-        let pixelsHigh = max(1, Int((pointSize.height * scale).rounded(.up)))
-
-        guard let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixelsWide,
-            pixelsHigh: pixelsHigh,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
+        // AppKit explicitly recommends obtaining the bitmap representation from
+        // the view when using cacheDisplay(in:to:). This preserves the view's
+        // native backing format and coordinate conventions instead of guessing
+        // them in a manually-created bitmap.
+        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(
+            in: hostingView.bounds
         ) else {
             throw XRSwiftUIPanelError.bitmapContextCreationFailed
         }
@@ -153,9 +145,17 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        // Let NSWindow perform normal hit-testing and responder dispatch into the
-        // hosted SwiftUI hierarchy rather than calling NSHostingView directly.
-        window.sendEvent(event)
+        // NSHostingView overrides these AppKit mouse methods specifically to
+        // bridge events into its SwiftUI hierarchy. Deliver directly to that
+        // bridge rather than asking a separate hidden window to redispatch them.
+        switch type {
+        case .leftMouseDragged:
+            hostingView.mouseDragged(with: event)
+        case .rightMouseDragged:
+            hostingView.rightMouseDragged(with: event)
+        default:
+            hostingView.mouseMoved(with: event)
+        }
     }
 
     private func sendPointerButton(
@@ -187,7 +187,18 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        window.sendEvent(event)
+        switch type {
+        case .leftMouseDown:
+            hostingView.mouseDown(with: event)
+        case .leftMouseUp:
+            hostingView.mouseUp(with: event)
+        case .rightMouseDown:
+            hostingView.rightMouseDown(with: event)
+        case .rightMouseUp:
+            hostingView.rightMouseUp(with: event)
+        default:
+            break
+        }
     }
 
     private func sendScroll(
@@ -217,7 +228,7 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        window.sendEvent(event)
+        hostingView.scrollWheel(with: event)
     }
 
     private func sendKey(
@@ -257,14 +268,24 @@ final class XRSwiftUIHost<Content: View> {
         }
 
         window.makeFirstResponder(hostingView)
-        window.sendEvent(down)
-        window.sendEvent(up)
+        hostingView.keyDown(with: down)
+        hostingView.keyUp(with: up)
     }
 
     private func windowPoint(for normalizedPosition: SIMD2<Float>) -> NSPoint {
-        let x = CGFloat(normalizedPosition.x) * pointSize.width
-        let y = (1 - CGFloat(normalizedPosition.y)) * pointSize.height
-        return NSPoint(x: x, y: y)
+        // Panel coordinates are always top-left based. Convert through the
+        // hosting view so this remains correct regardless of whether Apple's
+        // current NSHostingView implementation reports a flipped coordinate
+        // system.
+        let x = CGFloat(normalizedPosition.x) * hostingView.bounds.width
+        let y: CGFloat
+        if hostingView.isFlipped {
+            y = CGFloat(normalizedPosition.y) * hostingView.bounds.height
+        } else {
+            y = (1 - CGFloat(normalizedPosition.y)) * hostingView.bounds.height
+        }
+
+        return hostingView.convert(NSPoint(x: x, y: y), to: nil)
     }
 
     private static func functionKey(_ value: UInt32) -> String {
