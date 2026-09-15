@@ -14,6 +14,9 @@ final class XRSwiftUIHost<Content: View> {
 
     private let window: XRSwiftUIHostingWindow
     private let hostingView: NSHostingView<Content>
+
+    // Semantic-pointer state. The native macOS mouse path bypasses these
+    // synthetic semantics and instead transforms the real AppKit event stream.
     private var pressedButtons: Set<XRPanelPointerButton> = []
     private var pendingAccessibilityButton = false
 
@@ -75,6 +78,91 @@ final class XRSwiftUIHost<Content: View> {
         return image
     }
 
+    // MARK: - Native macOS mouse path
+
+    /// Make the hidden SwiftUI host the real key/responder target before the
+    /// transparent capture windows are installed. The capture windows are
+    /// deliberately non-key so AppKit tracking remains associated with this
+    /// window throughout a native control interaction.
+    func prepareForNativeMouseCapture() {
+        prepareForInteraction()
+    }
+
+    /// Convert a physical mouse/trackpad NSEvent into the equivalent event for
+    /// the off-screen SwiftUI window at the current virtual panel position.
+    ///
+    /// `XRMacApplication.nextEvent(...)` returns this event directly to AppKit.
+    /// That is important: controls such as Slider consume drag/up events inside
+    /// nested tracking loops, which bypass NSEvent local monitors.
+    func transformNativeMouseEvent(
+        _ source: NSEvent,
+        pointerPosition: SIMD2<Float>
+    ) -> NSEvent? {
+        prepareForInteraction()
+
+        switch source.type {
+        case .mouseMoved,
+             .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+             .leftMouseDown, .leftMouseUp,
+             .rightMouseDown, .rightMouseUp,
+             .otherMouseDown, .otherMouseUp:
+            let point = windowPoint(for: pointerPosition)
+
+            return NSEvent.mouseEvent(
+                with: source.type,
+                location: point,
+                modifierFlags: source.modifierFlags,
+                timestamp: source.timestamp,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: source.eventNumber,
+                clickCount: source.clickCount,
+                pressure: source.pressure
+            )
+
+        case .scrollWheel:
+            // Scroll events do not have a modern public NSEvent constructor that
+            // lets us retarget windowNumber while preserving precise scrolling
+            // metadata. Dispatch the original deltas directly to the known host
+            // window instead; scroll does not participate in mouse tracking.
+            sendNativeScroll(source, pointerPosition: pointerPosition)
+            return nil
+
+        default:
+            return source
+        }
+    }
+
+    private func sendNativeScroll(
+        _ source: NSEvent,
+        pointerPosition: SIMD2<Float>
+    ) {
+        let x = Int32(source.scrollingDeltaX.rounded())
+        let y = Int32(source.scrollingDeltaY.rounded())
+
+        guard let cgEvent = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: source.hasPreciseScrollingDeltas ? .pixel : .line,
+            wheelCount: 2,
+            wheel1: y,
+            wheel2: x,
+            wheel3: 0
+        ) else {
+            return
+        }
+
+        let pointInWindow = windowPoint(for: pointerPosition)
+        cgEvent.location = window.convertPoint(toScreen: pointInWindow)
+
+        guard let event = NSEvent(cgEvent: cgEvent) else {
+            return
+        }
+
+        window.sendEvent(event)
+    }
+
+    // MARK: - Device-neutral semantic path
+
     func handle(
         _ event: XRPanelInteractionEvent,
         pointerPosition: SIMD2<Float>?
@@ -133,8 +221,6 @@ final class XRSwiftUIHost<Content: View> {
     private func sendPointerMove(to normalizedPosition: SIMD2<Float>) {
         prepareForInteraction()
 
-        // Buttons use the accessibility fallback below. Avoid sending an
-        // unmatched drag stream into NSHostingView while such a press is held.
         if pendingAccessibilityButton && pressedButtons.contains(.primary) {
             return
         }
@@ -164,8 +250,6 @@ final class XRSwiftUIHost<Content: View> {
             return
         }
 
-        // This direct host-window path is known to preserve Toggle and Slider
-        // interaction in the off-screen SwiftUI hierarchy.
         window.sendEvent(event)
     }
 
@@ -178,21 +262,12 @@ final class XRSwiftUIHost<Content: View> {
 
         if button == .primary {
             if down {
-                // Standard SwiftUI Button actions have not reliably completed via
-                // synthetic AppKit mouse-up events, although Toggle and Slider do.
-                // Use the accessibility tree only when the press actually begins
-                // over a semantic Button.
                 if accessibilityButton(at: normalizedPosition) != nil {
                     pendingAccessibilityButton = true
                     return
                 }
             } else if pendingAccessibilityButton {
                 pendingAccessibilityButton = false
-
-                // Match normal click semantics sufficiently for XR: a press that
-                // began on a Button activates only when release is also on a
-                // Button. Do not depend on accessibility wrapper identity because
-                // SwiftUI may return a fresh wrapper on each hit test.
                 if let releaseButton = accessibilityButton(
                     at: normalizedPosition
                 ) {
