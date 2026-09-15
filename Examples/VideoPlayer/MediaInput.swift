@@ -1,6 +1,6 @@
 import Foundation
 
-struct ResolvedMediaInput {
+struct ResolvedMediaInput: Sendable {
     let url: URL
     let youtubeEACHint: Bool
     let ambisonicURL: URL?
@@ -10,8 +10,8 @@ struct ResolvedMediaInput {
 enum MediaInputError: Error, CustomStringConvertible {
     case noInput
     case fileDoesNotExist(String)
-    case cacheDirectory(Error)
-    case commandLaunch(String, Error)
+    case cacheDirectory(String)
+    case commandLaunch(String, String)
     case commandFailed(String, Int32)
     case noDownloadedFile
 
@@ -21,10 +21,10 @@ enum MediaInputError: Error, CustomStringConvertible {
             return "No media input supplied"
         case let .fileDoesNotExist(path):
             return "Media file does not exist: \(path)"
-        case let .cacheDirectory(error):
-            return "Could not create YouTube cache directory: \(error.localizedDescription)"
-        case let .commandLaunch(command, error):
-            return "Could not launch \(command): \(error.localizedDescription)"
+        case let .cacheDirectory(message):
+            return "Could not create YouTube cache directory: \(message)"
+        case let .commandLaunch(command, message):
+            return "Could not launch \(command): \(message)"
         case let .commandFailed(command, status):
             return "\(command) exited with status \(status)"
         case .noDownloadedFile:
@@ -33,16 +33,13 @@ enum MediaInputError: Error, CustomStringConvertible {
     }
 }
 
-@MainActor
 enum MediaInputResolver {
-    private static let fileManager = FileManager.default
-
     static func resolve(_ input: String) throws -> ResolvedMediaInput {
         guard !input.isEmpty else { throw MediaInputError.noInput }
 
         if !isHTTPURL(input) {
             let expanded = NSString(string: input).expandingTildeInPath
-            guard fileManager.fileExists(atPath: expanded) else {
+            guard FileManager.default.fileExists(atPath: expanded) else {
                 throw MediaInputError.fileDoesNotExist(expanded)
             }
             return ResolvedMediaInput(
@@ -85,12 +82,13 @@ enum MediaInputResolver {
     }
 
     private static func cacheDirectory() throws -> URL {
-        let url = fileManager.homeDirectoryForCurrentUser
+        let fm = FileManager.default
+        let url = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/GAVPSVR2/YouTube", isDirectory: true)
         do {
-            try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+            try fm.createDirectory(at: url, withIntermediateDirectories: true)
         } catch {
-            throw MediaInputError.cacheDirectory(error)
+            throw MediaInputError.cacheDirectory(error.localizedDescription)
         }
         return url
     }
@@ -105,7 +103,7 @@ enum MediaInputResolver {
             return nil
         }
         let path = NSString(string: raw).expandingTildeInPath
-        guard fileManager.fileExists(atPath: path) else {
+        guard FileManager.default.fileExists(atPath: path) else {
             fputs("[audio] Ambisonic override does not exist: \(path)\n", stderr)
             return nil
         }
@@ -114,7 +112,7 @@ enum MediaInputResolver {
 
     private static func findCachedYouTubeFile(cache: URL, videoID: String?) -> URL? {
         guard let videoID, !videoID.isEmpty else { return nil }
-        guard let entries = try? fileManager.contentsOfDirectory(
+        guard let entries = try? FileManager.default.contentsOfDirectory(
             at: cache,
             includingPropertiesForKeys: nil
         ) else { return nil }
@@ -148,7 +146,7 @@ enum MediaInputResolver {
     private static func findCachedAmbisonicFile(cache: URL, videoID: String?) -> URL? {
         if let override = localAmbisonicOverride() { return override }
         guard let videoID, !videoID.isEmpty else { return nil }
-        guard let entries = try? fileManager.contentsOfDirectory(
+        guard let entries = try? FileManager.default.contentsOfDirectory(
             at: cache,
             includingPropertiesForKeys: nil
         ) else { return nil }
@@ -245,7 +243,7 @@ enum MediaInputResolver {
         ), result.status == 0 else { return nil }
 
         let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty, fileManager.fileExists(atPath: path) else { return nil }
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
         let url = URL(fileURLWithPath: path)
         if let channels = audioChannelCount(url), channels > 2 {
             print("[audio] downloaded \(channels)-channel sidecar: \(path)")
@@ -300,7 +298,7 @@ enum MediaInputResolver {
         }
 
         let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty, fileManager.fileExists(atPath: path) else {
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else {
             throw MediaInputError.noDownloadedFile
         }
         let url = URL(fileURLWithPath: path)
@@ -339,7 +337,7 @@ enum MediaInputResolver {
         do {
             try process.run()
         } catch {
-            throw MediaInputError.commandLaunch(executable, error)
+            throw MediaInputError.commandLaunch(executable, error.localizedDescription)
         }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
