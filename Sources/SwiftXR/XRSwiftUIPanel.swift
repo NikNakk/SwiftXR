@@ -22,22 +22,22 @@ public enum XRSwiftUIPanelError: Error, CustomStringConvertible {
 
 /// A hosted SwiftUI surface rendered into a shader-readable Metal texture.
 ///
-/// The same `NSHostingView` supplies both the pixels shown in XR and, during
-/// `XRMacPointerCapture(panel:)`, the real native AppKit interaction surface.
-/// The macOS mouse therefore interacts with ordinary SwiftUI controls without
-/// SwiftXR synthesising or retargeting mouse events.
+/// On macOS the panel may be driven by a virtual pointer. Physical mouse input
+/// is captured separately, converted into normalized panel coordinates, then
+/// posted as ordinary AppKit mouse events addressed to this panel's off-screen
+/// NSHostingView window. The visible cursor remains the XR-rendered cursor.
 @MainActor
 public final class XRSwiftUIPanel<Content: View> {
     private let device: any MTLDevice
     private let textureLoader: MTKTextureLoader
     private let host: XRSwiftUIHost<Content>
-    private var nativeInputNeedsRefresh = false
+    private var inputNeedsRefresh = false
 
     public let pointSize: CGSize
     public let scale: CGFloat
 
-    /// Semantic panel-input endpoint for gamepads, ray pointers, future Sense
-    /// controller input, and other non-native pointer sources.
+    /// Semantic panel-input endpoint for mouse capture, gamepads, ray pointers,
+    /// future Sense-controller input, and other non-native pointer sources.
     public let interaction: XRPanelInteraction
 
     public private(set) var texture: any MTLTexture
@@ -82,11 +82,10 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            try? self.refresh()
-
-            DispatchQueue.main.async { [weak self] in
-                try? self?.refresh()
-            }
+            // The synthetic NSEvent is queued, not dispatched synchronously.
+            // Mark the texture dirty now; the next XR frame will rasterize after
+            // AppKit has had a chance to deliver the event to SwiftUI.
+            self.inputNeedsRefresh = true
         }
     }
 
@@ -95,20 +94,12 @@ public final class XRSwiftUIPanel<Content: View> {
         interaction.send(event)
     }
 
-    /// Refresh only when native AppKit input has changed the hosted surface.
-    /// Applications using `XRMacPointerCapture(panel:)` should call this once per
-    /// XR frame before drawing the panel. It also samples the real system cursor
-    /// so the XR software cursor continues to track during AppKit nested control
-    /// tracking (for example while a Slider is being dragged).
+    /// Refresh after queued AppKit input may have changed the hosted SwiftUI
+    /// hierarchy. Applications should call this once per XR frame before drawing
+    /// the panel.
     public func refreshIfNeeded() throws {
-        if let position = host.realMousePointerPosition(),
-           interaction.pointerPosition != position {
-            interaction.setNativePointerPosition(position)
-            nativeInputNeedsRefresh = true
-        }
-
-        guard nativeInputNeedsRefresh else { return }
-        nativeInputNeedsRefresh = false
+        guard inputNeedsRefresh else { return }
+        inputNeedsRefresh = false
         try refresh()
     }
 
@@ -165,26 +156,6 @@ public final class XRSwiftUIPanel<Content: View> {
         }
     }
 
-    // MARK: - Real macOS mouse integration
-
-    func beginRealMacPointerCapture() {
-        host.beginRealMouseCaptureSurface()
-        nativeInputNeedsRefresh = true
-    }
-
-    func endRealMacPointerCapture() {
-        host.endRealMouseCaptureSurface()
-        nativeInputNeedsRefresh = true
-    }
-
-    func realMacPointerPosition() -> SIMD2<Float>? {
-        host.realMousePointerPosition()
-    }
-
-    func invalidateRealMacInput() {
-        nativeInputNeedsRefresh = true
-    }
-
     private static func makeTexture(
         loader: MTKTextureLoader,
         image: CGImage
@@ -206,33 +177,16 @@ public final class XRSwiftUIPanel<Content: View> {
 }
 
 public extension XRMacPointerCapture {
-    /// Capture the real macOS mouse/trackpad for a hosted SwiftUI panel.
-    ///
-    /// Unlike the device-neutral `init(interaction:)` path this does not
-    /// disassociate the mouse or manufacture NSEvents. The actual NSHostingView
-    /// becomes an effectively invisible desktop-sized key window and receives
-    /// the ordinary AppKit mouse stream directly. This is the preferred macOS
-    /// path for Buttons, Sliders, hover effects, scrolling, context menus and
-    /// SwiftUI drag gestures.
+    /// Capture the physical Mac mouse/trackpad as a virtual pointer for a hosted
+    /// SwiftUI panel. The system cursor is hidden/disassociated; SwiftXR posts a
+    /// separate event stream to the panel's off-screen AppKit window.
     convenience init<Content: View>(
         panel: XRSwiftUIPanel<Content>,
         movementScale: SIMD2<Float> = SIMD2(700, 500)
     ) {
         self.init(
             interaction: panel.interaction,
-            movementScale: movementScale,
-            realSurfaceBegin: { [weak panel] in
-                panel?.beginRealMacPointerCapture()
-            },
-            realSurfaceEnd: { [weak panel] in
-                panel?.endRealMacPointerCapture()
-            },
-            realPointerProvider: { [weak panel] in
-                panel?.realMacPointerPosition()
-            },
-            realInputInvalidation: { [weak panel] in
-                panel?.invalidateRealMacInput()
-            }
+            movementScale: movementScale
         )
     }
 }
