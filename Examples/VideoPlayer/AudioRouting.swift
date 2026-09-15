@@ -3,31 +3,29 @@ import CoreAudio
 import Foundation
 
 enum VideoAudioRouting {
+    struct Device {
+        let id: AudioDeviceID
+        let name: String
+        let uid: String?
+    }
+
     @discardableResult
-    static func routeToPSVR2(_ player: AVPlayer) -> String? {
+    static func routeToPSVR2(_ player: AVPlayer) -> Device? {
         guard let device = findPSVR2Device() else {
             fputs("[audio] PS VR2 output device not found; using current macOS default output\n", stderr)
             return nil
         }
-        guard let uid = stringProperty(
-            objectID: device.id,
-            selector: kAudioDevicePropertyDeviceUID
-        ) else {
+        guard let uid = device.uid else {
             fputs("[audio] PS VR2 device found but its CoreAudio UID could not be read\n", stderr)
             return nil
         }
 
         player.audioOutputDeviceUniqueID = uid
         print("[audio] routed AVPlayer to headset: \(device.name)")
-        return device.name
+        return device
     }
 
-    private struct Device {
-        let id: AudioDeviceID
-        let name: String
-    }
-
-    private static func findPSVR2Device() -> Device? {
+    static func findPSVR2Device() -> Device? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -61,7 +59,14 @@ enum VideoAudioRouting {
             ) else { continue }
             let normalized = name.lowercased().replacingOccurrences(of: " ", with: "")
             if normalized.contains("psvr2") {
-                return Device(id: id, name: name)
+                return Device(
+                    id: id,
+                    name: name,
+                    uid: stringProperty(
+                        objectID: id,
+                        selector: kAudioDevicePropertyDeviceUID
+                    )
+                )
             }
         }
         return nil
