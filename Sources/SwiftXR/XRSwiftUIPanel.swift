@@ -24,6 +24,10 @@ public enum XRSwiftUIPanelError: Error, CustomStringConvertible {
 /// The SwiftUI hierarchy is rendered only when the panel is created or `refresh()`
 /// is called. The resulting texture can then be reused on every XR frame without
 /// re-running SwiftUI layout/rasterization at headset refresh rate.
+///
+/// `interaction` is deliberately device-neutral. Applications keep using their
+/// normal GameController/AppKit/engine input APIs and forward only panel-relevant
+/// semantic operations such as navigation, selection, pointer movement, or scroll.
 @MainActor
 public final class XRSwiftUIPanel<Content: View> {
     private let device: any MTLDevice
@@ -31,6 +35,9 @@ public final class XRSwiftUIPanel<Content: View> {
 
     public let pointSize: CGSize
     public let scale: CGFloat
+
+    /// Semantic panel-input endpoint. This is not a hardware input abstraction.
+    public let interaction: XRPanelInteraction
 
     public private(set) var texture: any MTLTexture
 
@@ -42,11 +49,13 @@ public final class XRSwiftUIPanel<Content: View> {
         device: any MTLDevice,
         pointSize: CGSize,
         scale: CGFloat = 2.0,
+        interactionHandler: XRPanelInteraction.Handler? = nil,
         @ViewBuilder content: () -> Content
     ) throws {
         self.device = device
         self.pointSize = pointSize
         self.scale = scale
+        self.interaction = XRPanelInteraction(handler: interactionHandler)
 
         let renderer = ImageRenderer(content: content())
         renderer.proposedSize = ProposedViewSize(
@@ -65,6 +74,11 @@ public final class XRSwiftUIPanel<Content: View> {
             device: device,
             image: cgImage
         )
+    }
+
+    /// Forward a device-neutral interaction intent to this panel.
+    public func send(_ event: XRPanelInteractionEvent) {
+        interaction.send(event)
     }
 
     /// Rasterize the panel's current SwiftUI content again and update its texture.
