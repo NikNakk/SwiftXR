@@ -4,15 +4,12 @@ import simd
 
 public enum XRMacPointerCaptureError: Error, CustomStringConvertible {
     case applicationNotActive
-    case nativeEventRoutingUnavailable
     case mouseCursorDisassociationFailed(CGError)
 
     public var description: String {
         switch self {
         case .applicationNotActive:
             return "SwiftXR pointer capture requires a running, active foreground macOS application"
-        case .nativeEventRoutingUnavailable:
-            return "Native SwiftXR mouse routing requires XRMacApplication as the AppKit principal class"
         case let .mouseCursorDisassociationFailed(error):
             return "Could not disassociate the macOS mouse from the system cursor (CGError \(error.rawValue))"
         }
@@ -21,46 +18,44 @@ public enum XRMacPointerCaptureError: Error, CustomStringConvertible {
 
 @MainActor
 private final class XRPointerCaptureWindow: NSWindow {
-    // These windows exist only to keep physical pointer events inside the active
-    // SwiftXR process. They must never steal key/main status from the hidden
-    // NSHostingView window that is the true AppKit interaction target.
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 /// Exclusive mouse/trackpad capture for an XR panel on macOS.
 ///
-/// In the native SwiftUI path, mouse events are transformed in
-/// `XRMacApplication.nextEvent(...)`, before AppKit controls can enter nested
-/// tracking loops. This is essential for controls such as Slider: local event
-/// monitors are bypassed by nested control tracking.
+/// There are two modes:
+/// - `init(interaction:)` keeps the older device-neutral relative-pointer path,
+///   disassociating the system cursor and translating deltas into SwiftXR events.
+/// - `init(panel:)` (declared alongside XRSwiftUIPanel) keeps the real macOS
+///   cursor associated and gives the actual hosted SwiftUI window the desktop as
+///   its interaction surface. This preserves native Button, Slider, hover,
+///   scrolling and drag semantics.
 @MainActor
 public final class XRMacPointerCapture: NSObject {
-    typealias NativeEventTransformer = (NSEvent, SIMD2<Float>) -> NSEvent?
-
     public let interaction: XRPanelInteraction
 
-    /// Number of physical pointer delta units required to cross the panel.
-    /// Larger values make the virtual XR pointer less sensitive.
+    /// Number of physical pointer delta units required to cross the panel in the
+    /// device-neutral relative-pointer mode. The real SwiftUI mouse path does not
+    /// use this scale because AppKit maps the real desktop pointer itself.
     public var movementScale: SIMD2<Float>
 
     public private(set) var escapeRequested = false
     public private(set) var isCaptureRequested = false
     public private(set) var isCaptured = false
 
-    private let nativeEventTransformer: NativeEventTransformer?
-    private let nativeCapturePreparation: (() -> Void)?
+    private let realSurfaceBegin: (() -> Void)?
+    private let realSurfaceEnd: (() -> Void)?
+    private let realPointerProvider: (() -> SIMD2<Float>?)?
+    private let realInputInvalidation: (() -> Void)?
 
     private var eventMonitor: Any?
     private var captureWindows: [NSWindow] = []
     private var savedCursorPosition: CGPoint?
     private var cursorHidden = false
-    private var usesNativeApplicationRouting = false
 
-    /// Semantic pointer capture. This remains useful for applications that want
-    /// to translate a macOS mouse into SwiftXR's device-neutral interaction API.
-    /// For hosted SwiftUI, prefer `XRMacPointerCapture(panel:)`, which preserves
-    /// native AppKit control tracking and hover behavior.
+    /// Device-neutral relative mouse capture. For a hosted SwiftUI panel prefer
+    /// `XRMacPointerCapture(panel:)` so SwiftUI sees the real AppKit pointer.
     public convenience init(
         interaction: XRPanelInteraction,
         movementScale: SIMD2<Float> = SIMD2(700, 500)
@@ -68,21 +63,27 @@ public final class XRMacPointerCapture: NSObject {
         self.init(
             interaction: interaction,
             movementScale: movementScale,
-            nativeEventTransformer: nil,
-            nativeCapturePreparation: nil
+            realSurfaceBegin: nil,
+            realSurfaceEnd: nil,
+            realPointerProvider: nil,
+            realInputInvalidation: nil
         )
     }
 
     init(
         interaction: XRPanelInteraction,
         movementScale: SIMD2<Float>,
-        nativeEventTransformer: NativeEventTransformer?,
-        nativeCapturePreparation: (() -> Void)?
+        realSurfaceBegin: (() -> Void)?,
+        realSurfaceEnd: (() -> Void)?,
+        realPointerProvider: (() -> SIMD2<Float>?)?,
+        realInputInvalidation: (() -> Void)?
     ) {
         self.interaction = interaction
         self.movementScale = movementScale
-        self.nativeEventTransformer = nativeEventTransformer
-        self.nativeCapturePreparation = nativeCapturePreparation
+        self.realSurfaceBegin = realSurfaceBegin
+        self.realSurfaceEnd = realSurfaceEnd
+        self.realPointerProvider = realPointerProvider
+        self.realInputInvalidation = realInputInvalidation
         super.init()
 
         NotificationCenter.default.addObserver(
@@ -107,23 +108,16 @@ public final class XRMacPointerCapture: NSObject {
             throw XRMacPointerCaptureError.applicationNotActive
         }
 
-        if nativeEventTransformer != nil,
-           !(application is XRMacApplication) {
-            throw XRMacPointerCaptureError.nativeEventRoutingUnavailable
-        }
-
         escapeRequested = false
         isCaptureRequested = true
 
-        if nativeEventTransformer != nil {
-            interaction.setNativePointerPosition(SIMD2<Float>(0.5, 0.5))
-            nativeCapturePreparation?()
-        } else {
-            interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
-        }
-
         do {
-            try acquirePhysicalCapture()
+            if realPointerProvider != nil {
+                try acquireRealSurfaceCapture()
+            } else {
+                interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
+                try acquireRelativeCapture()
+            }
         } catch {
             isCaptureRequested = false
             releasePhysicalCapture(restoreCursor: true)
@@ -140,6 +134,25 @@ public final class XRMacPointerCapture: NSObject {
         escapeRequested = false
     }
 
+    /// Synchronize SwiftXR's software cursor with the real macOS cursor. This is
+    /// a no-op for device-neutral relative capture. Applications using
+    /// `XRMacPointerCapture(panel:)` should call it once per XR frame before
+    /// drawing the panel.
+    public func syncPointerPosition() {
+        guard
+            isCaptureRequested,
+            let realPointerProvider,
+            let position = realPointerProvider()
+        else {
+            return
+        }
+
+        if interaction.pointerPosition != position {
+            interaction.setNativePointerPosition(position)
+            realInputInvalidation?()
+        }
+    }
+
     @objc
     private func applicationDidResignActive() {
         releasePhysicalCapture(restoreCursor: true)
@@ -148,16 +161,84 @@ public final class XRMacPointerCapture: NSObject {
     @objc
     private func applicationDidBecomeActive() {
         guard isCaptureRequested, !isCaptured else { return }
-        try? acquirePhysicalCapture()
+
+        if realPointerProvider != nil {
+            try? acquireRealSurfaceCapture()
+        } else {
+            try? acquireRelativeCapture()
+        }
     }
 
-    private func acquirePhysicalCapture() throws {
+    // MARK: - Real SwiftUI mouse surface
+
+    private func acquireRealSurfaceCapture() throws {
         guard isCaptureRequested, !isCaptured else { return }
         guard NSApplication.shared.isActive else {
             throw XRMacPointerCaptureError.applicationNotActive
         }
 
-        nativeCapturePreparation?()
+        // Crucially, do NOT call CGAssociateMouseAndMouseCursorPosition(false).
+        // The real system cursor remains the pointer AppKit uses for hit testing,
+        // hover and control tracking. We hide only its visual representation.
+        realSurfaceBegin?()
+        syncPointerPosition()
+
+        NSCursor.hide()
+        cursorHidden = true
+        installRealSurfaceEventMonitor()
+        isCaptured = true
+    }
+
+    private func installRealSurfaceEventMonitor() {
+        guard eventMonitor == nil else { return }
+
+        let mask: NSEvent.EventTypeMask = [
+            .mouseMoved,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged,
+            .leftMouseDown,
+            .leftMouseUp,
+            .rightMouseDown,
+            .rightMouseUp,
+            .otherMouseDown,
+            .otherMouseUp,
+            .scrollWheel,
+            .keyDown,
+        ]
+
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self else { return event }
+
+            let consumeEscape: Bool = MainActor.assumeIsolated {
+                guard self.isCaptured else { return false }
+
+                if event.type == .keyDown && event.keyCode == 53 {
+                    self.escapeRequested = true
+                    self.stop()
+                    return true
+                }
+
+                // Do not alter or redispatch native pointer events. SwiftUI sees
+                // the original NSEvent unchanged. We only mirror the real cursor
+                // into the XR software cursor and schedule a texture refresh.
+                self.syncPointerPosition()
+                self.realInputInvalidation?()
+                return false
+            }
+
+            return consumeEscape ? nil : event
+        }
+    }
+
+    // MARK: - Device-neutral relative pointer capture
+
+    private func acquireRelativeCapture() throws {
+        guard isCaptureRequested, !isCaptured else { return }
+        guard NSApplication.shared.isActive else {
+            throw XRMacPointerCaptureError.applicationNotActive
+        }
+
         savedCursorPosition = CGEvent(source: nil)?.location
         createCaptureWindows()
 
@@ -169,43 +250,8 @@ public final class XRMacPointerCapture: NSObject {
 
         NSCursor.hide()
         cursorHidden = true
-
-        if nativeEventTransformer != nil {
-            try installNativeApplicationRouting()
-        } else {
-            installSemanticEventMonitor()
-        }
-
+        installSemanticEventMonitor()
         isCaptured = true
-    }
-
-    private func releasePhysicalCapture(restoreCursor: Bool) {
-        if usesNativeApplicationRouting,
-           let application = NSApplication.shared as? XRMacApplication {
-            application.swiftXREventTransformer = nil
-            usesNativeApplicationRouting = false
-        }
-
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
-
-        if isCaptured || cursorHidden {
-            _ = CGAssociateMouseAndMouseCursorPosition(1)
-        }
-
-        if cursorHidden {
-            NSCursor.unhide()
-            cursorHidden = false
-        }
-
-        if restoreCursor, let savedCursorPosition {
-            CGWarpMouseCursorPosition(savedCursorPosition)
-        }
-
-        destroyCaptureWindows()
-        isCaptured = false
     }
 
     private func createCaptureWindows() {
@@ -238,6 +284,8 @@ public final class XRMacPointerCapture: NSObject {
             window.orderFrontRegardless()
             return window
         }
+
+        captureWindows.first?.makeKeyAndOrderFront(nil)
     }
 
     private func destroyCaptureWindows() {
@@ -246,53 +294,6 @@ public final class XRMacPointerCapture: NSObject {
             window.close()
         }
         captureWindows.removeAll()
-    }
-
-    private func installNativeApplicationRouting() throws {
-        guard
-            let application = NSApplication.shared as? XRMacApplication,
-            nativeEventTransformer != nil
-        else {
-            throw XRMacPointerCaptureError.nativeEventRoutingUnavailable
-        }
-
-        application.swiftXREventTransformer = { [weak self] event in
-            guard let self else { return event }
-            return self.transformNativeApplicationEvent(event)
-        }
-        usesNativeApplicationRouting = true
-    }
-
-    private func transformNativeApplicationEvent(_ event: NSEvent) -> NSEvent? {
-        guard isCaptureRequested else { return event }
-
-        switch event.type {
-        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            let xScale = max(movementScale.x, 1)
-            let yScale = max(movementScale.y, 1)
-            let position = interaction.moveNativePointer(
-                by: SIMD2(
-                    Float(event.deltaX) / xScale,
-                    Float(event.deltaY) / yScale
-                )
-            )
-            return nativeEventTransformer?(event, position)
-
-        case .leftMouseDown, .leftMouseUp,
-             .rightMouseDown, .rightMouseUp,
-             .otherMouseDown, .otherMouseUp,
-             .scrollWheel:
-            let position = interaction.pointerPosition ?? SIMD2<Float>(0.5, 0.5)
-            return nativeEventTransformer?(event, position)
-
-        case .keyDown where event.keyCode == 53:
-            escapeRequested = true
-            stop()
-            return nil
-
-        default:
-            return event
-        }
     }
 
     private func installSemanticEventMonitor() {
@@ -374,5 +375,34 @@ public final class XRMacPointerCapture: NSObject {
         default:
             return true
         }
+    }
+
+    // MARK: - Release
+
+    private func releasePhysicalCapture(restoreCursor: Bool) {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
+
+        if realPointerProvider != nil {
+            realSurfaceEnd?()
+        } else if isCaptured || cursorHidden || !captureWindows.isEmpty {
+            _ = CGAssociateMouseAndMouseCursorPosition(1)
+        }
+
+        if cursorHidden {
+            NSCursor.unhide()
+            cursorHidden = false
+        }
+
+        if realPointerProvider == nil,
+           restoreCursor,
+           let savedCursorPosition {
+            CGWarpMouseCursorPosition(savedCursorPosition)
+        }
+
+        destroyCaptureWindows()
+        isCaptured = false
     }
 }
