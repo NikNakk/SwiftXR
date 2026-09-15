@@ -1,55 +1,53 @@
-# SwiftXR video player proof of concept
+# SwiftXR video player
 
-This example ports the first GAV + Monado/OpenXR video proof of concept onto SwiftXR.
-
-The architecture is intentionally small:
+This example ports the GAV + Monado/OpenXR video proof of concept onto SwiftXR while keeping the media path separate from the OpenXR runtime plumbing.
 
 ```text
-local movie
-   ↓
+local movie or YouTube URL
+        ↓
+MediaInputResolver / yt-dlp cache
+        ↓
 AVPlayer / AVPlayerItemVideoOutput
-   ↓
-BGRA CVPixelBuffer
-   ↓
-CVMetalTexture on SwiftXR's runtime-selected MTLDevice
-   ↓
-world-locked Metal quad
-   ↓
+        ↓
+BGRA CVPixelBuffer → CVMetalTexture
+        ↓
+flat / VR180 / fisheye / EAC360 Metal projection
+        ↓
 SwiftXR stereo OpenXR swapchain
-   ↓
+        ↓
 OpenXR runtime (Monado initially)
-   ↓
+        ↓
 PSVR2
 ```
 
-AVPlayer remains the media clock and plays the movie audio. SwiftXR owns the OpenXR instance/session lifecycle, view location, swapchain acquisition/release and projection-layer submission.
+For ordinary audio, `AVPlayer` is routed directly to the PS VR2 CoreAudio device when present. If a four-channel YouTube spatial-audio sidecar is available, it is decoded to an ACN/SN3D AmbiX CAF and rendered through `AVAudioEnvironmentNode` with SwiftXR headset orientation driving the binaural listener.
 
-## Current scope
+## Features
 
-Included in the first version:
-
-- local movie files;
-- AVFoundation video decode and audio playback;
-- BGRA `AVPlayerItemVideoOutput` frames;
-- zero-CPU-copy CoreVideo → Metal texture wrapping;
-- the exact Metal device selected by the OpenXR runtime;
-- world-locked flat video surface in LOCAL space;
-- aspect-ratio-preserving screen sizing matching the GAV OpenXR POC;
-- stereo rendering through SwiftXR's normal two-slice swapchain;
+- local movie playback through AVFoundation;
+- YouTube URL input through `yt-dlp`, using the same cache as the GAV OpenXR POC;
+- zero-CPU-copy CoreVideo → Metal texture wrapping on SwiftXR's runtime-selected `MTLDevice`;
+- flat world-space virtual screen;
+- SBS VR180 half-equirectangular projection;
+- SBS VR180 equidistant-fisheye projection;
+- mono YouTube/FFmpeg 3×2 EAC360 projection, including FFmpeg-compatible face rotations and edge padding;
+- immersive scene anchored to initial gaze, with recenter and scene tilt;
+- explicit PS VR2 audio-device routing for ordinary stereo audio;
+- optional head-tracked four-channel AmbiX audio with host-clock video/audio synchronization;
+- game-controller play/pause, seek, volume, recenter and scene tilt;
 - no extra per-frame CPU wait for Metal completion.
 
-Deferred deliberately until this path is proven on-device:
+## Dependencies
 
-- SwiftUI transport controls;
-- seeking / play-pause input;
-- explicit PSVR2 audio routing;
-- SBS / over-under stereo;
-- 180°, 360°, fisheye and EAC projections;
-- HDR / colour-space work;
-- URL / yt-dlp input;
-- ambisonic audio.
+Local flat/immersive files only require the normal SwiftXR/OpenXR dependencies.
 
-For the first test use a conventional landscape SDR H.264/HEVC MP4.
+YouTube playback requires `yt-dlp` on `PATH`. Spatial-audio discovery/conversion additionally uses `ffprobe` and `ffmpeg`.
+
+For example with Homebrew:
+
+```sh
+brew install yt-dlp ffmpeg
+```
 
 ## Run
 
@@ -57,19 +55,76 @@ From the SwiftXR repository:
 
 ```sh
 XR_RUNTIME_JSON=/path/to/openxr_monado-dev.json \
-  swift run swiftxr-video /path/to/movie.mp4
+  swift run swiftxr-video "/path/to/movie.mp4"
 ```
 
-If the OpenXR loader is not already discoverable through the executable rpath, use the same loader environment as the other SwiftXR examples.
+YouTube URLs are accepted directly:
 
-Playback starts when the OpenXR session reaches READY. Audio follows the current macOS output device. Press Ctrl-C to terminate the proof of concept.
+```sh
+XR_RUNTIME_JSON=/path/to/openxr_monado-dev.json \
+  swift run swiftxr-video "https://www.youtube.com/watch?v=VIDEO_ID"
+```
 
-## What success proves
+The YouTube cache is shared with the mature GAV POC at:
 
-A stable world-locked flat movie with synchronized audio demonstrates that:
+```text
+~/Library/Caches/GAVPSVR2/YouTube
+```
 
-1. AVFoundation can decode into IOSurface-backed buffers usable by the runtime-selected Metal device.
-2. SwiftXR can consume those textures directly in a normal stereo projection frame.
-3. SwiftXR replaces the hand-written OpenXR plumbing from the GAV POC without changing the media architecture.
+## Projection selection
 
-The next step is to add the already-proven SwiftUI panel/input path for transport controls, then port the existing GAV immersive projection shaders one mode at a time.
+Automatic filename hints are deliberately conservative so an unmarked normal movie remains flat:
+
+- `EAC360` or `360` (without `180`) → EAC360;
+- `fisheye` → VR180 fisheye;
+- `VR180`, `180`, or `SBS` → VR180 equirectangular;
+- otherwise → flat.
+
+Override detection explicitly with:
+
+```sh
+SWIFTXR_VIDEO_PROJECTION=flat swift run swiftxr-video /path/movie.mp4
+SWIFTXR_VIDEO_PROJECTION=vr180 swift run swiftxr-video /path/vr180.mp4
+SWIFTXR_VIDEO_PROJECTION=fisheye swift run swiftxr-video /path/fisheye.mp4
+SWIFTXR_VIDEO_PROJECTION=eac360 swift run swiftxr-video /path/eac360.mp4
+```
+
+`GAV_MONADO_PROJECTION` is also accepted as a compatibility fallback.
+
+## Spatial audio
+
+When a YouTube URL exposes an audio-only format with more than two channels, the resolver downloads it as an Ambisonic sidecar and caches it. The player converts the sidecar to a four-channel 48 kHz float CAF and uses Apple's headphone spatial renderer with live SwiftXR head orientation.
+
+For a local file, supply a known four-channel AmbiX sidecar explicitly:
+
+```sh
+SWIFTXR_AMBISONIC_AUDIO=/path/to/spatial.webm \
+  swift run swiftxr-video /path/to/video.mp4
+```
+
+Disable spatial-audio discovery/use with:
+
+```sh
+SWIFTXR_AMBISONIC_AUDIO=off swift run swiftxr-video ...
+```
+
+`GAV_AMBISONIC_AUDIO` is accepted as a compatibility fallback.
+
+If the spatial path cannot be created, playback falls back to ordinary `AVPlayer` audio.
+
+## Controller controls
+
+With a GameController-compatible pad connected:
+
+- Cross / A: play or pause;
+- L1 / R1: seek −15 / +15 seconds;
+- D-pad left / right: seek −15 / +15 seconds;
+- D-pad up / down: volume ±5%;
+- Triangle / Y: recenter immersive scene;
+- right stick: yaw/pitch the immersive scene.
+
+## Current validation status
+
+The local flat decode → Metal → SwiftXR → PSVR2 path has been validated on-device. The immersive projection, YouTube, explicit audio routing, controller and AmbiX paths are ports of the corresponding proven GAV algorithms but still require device-level validation in this Swift implementation.
+
+A SwiftUI in-headset transport/browser panel is intentionally the next layer rather than a prerequisite for the playback core; SwiftXR's separate off-screen SwiftUI interaction proof of concept already provides the native-control input mechanism needed for that UI.
