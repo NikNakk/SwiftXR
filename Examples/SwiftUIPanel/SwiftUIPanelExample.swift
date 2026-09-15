@@ -11,6 +11,7 @@ private final class PanelModel: ObservableObject {
     @Published var activationCount = 0
 }
 
+@MainActor
 private struct SwiftXRCard: View {
     @ObservedObject var model: PanelModel
 
@@ -216,10 +217,10 @@ struct SwiftUIPanelExample {
                 )
             }
 
-            // Allow SwiftUI/AppKit and GameController callbacks to run between XR
-            // frames in this command-line sample. A normal app already has this
-            // run loop.
-            RunLoop.current.run(until: Date())
+            // This is a command-line demo rather than a normal NSApplication run
+            // loop, so explicitly allow queued SwiftUI/GameController callbacks to
+            // run briefly between XR frames.
+            RunLoop.current.run(until: Date().addingTimeInterval(0.001))
             frames += 1
         }
 
