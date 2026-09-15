@@ -71,19 +71,12 @@ public final class XRMacPointerCapture: NSObject {
     deinit {
         NotificationCenter.default.removeObserver(self)
 
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-        }
-
-        for window in captureWindows {
-            window.orderOut(nil)
-        }
-
+        // Normal lifetime cleanup is deliberately performed by `stop()` and by
+        // the application-resign-active observer. Avoid touching main-actor
+        // AppKit objects from a potentially nonisolated deinitializer under
+        // Swift 6 strict concurrency checking.
         if isCaptured {
             _ = CGAssociateMouseAndMouseCursorPosition(1)
-            if cursorHidden {
-                NSCursor.unhide()
-            }
             if let savedCursorPosition {
                 CGWarpMouseCursorPosition(savedCursorPosition)
             }
@@ -234,10 +227,15 @@ public final class XRMacPointerCapture: NSObject {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return event }
 
-            return MainActor.assumeIsolated {
-                guard self.isCaptured else { return event }
-                return self.handle(event) ? nil : event
+            // NSEvent is explicitly non-Sendable. Keep it outside the isolated
+            // result boundary: only the Bool decision crosses out of
+            // `assumeIsolated`, then return the original event here.
+            let shouldConsume: Bool = MainActor.assumeIsolated {
+                guard self.isCaptured else { return false }
+                return self.handle(event)
             }
+
+            return shouldConsume ? nil : event
         }
     }
 
