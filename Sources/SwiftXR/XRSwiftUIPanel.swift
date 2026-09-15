@@ -31,7 +31,12 @@ public final class XRSwiftUIPanel<Content: View> {
     private let device: any MTLDevice
     private let textureLoader: MTKTextureLoader
     private let host: XRSwiftUIHost<Content>
-    private var inputNeedsRefresh = false
+
+    // Queued AppKit events are dispatched after the XR frame callback returns.
+    // Keep refreshing for a small number of frames after input so at least one
+    // rasterization occurs after SwiftUI has applied the event's state change.
+    // Continuous dragging naturally keeps this counter topped up.
+    private var inputRefreshFramesRemaining = 0
 
     public let pointSize: CGSize
     public let scale: CGFloat
@@ -82,10 +87,15 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            // The synthetic NSEvent is queued, not dispatched synchronously.
-            // Mark the texture dirty now; the next XR frame will rasterize after
-            // AppKit has had a chance to deliver the event to SwiftUI.
-            self.inputNeedsRefresh = true
+            // A queued mouse/key event usually reaches AppKit after this XR frame
+            // returns. One immediate refresh may therefore still see the old
+            // SwiftUI state. Refresh a few consecutive frames so the first
+            // post-dispatch state is captured without continuously rasterizing
+            // an otherwise static panel.
+            self.inputRefreshFramesRemaining = max(
+                self.inputRefreshFramesRemaining,
+                3
+            )
         }
     }
 
@@ -94,12 +104,11 @@ public final class XRSwiftUIPanel<Content: View> {
         interaction.send(event)
     }
 
-    /// Refresh after queued AppKit input may have changed the hosted SwiftUI
-    /// hierarchy. Applications should call this once per XR frame before drawing
-    /// the panel.
+    /// Refresh after AppKit input may have changed the hosted SwiftUI hierarchy.
+    /// Applications should call this once per XR frame before drawing the panel.
     public func refreshIfNeeded() throws {
-        guard inputNeedsRefresh else { return }
-        inputNeedsRefresh = false
+        guard inputRefreshFramesRemaining > 0 else { return }
+        inputRefreshFramesRemaining -= 1
         try refresh()
     }
 
