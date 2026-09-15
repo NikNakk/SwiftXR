@@ -151,9 +151,9 @@ public final class XRMacPointerCapture: NSObject {
             interaction.pointerDown(.secondary)
         }
 
-        var dx: CGMouseDelta = 0
-        var dy: CGMouseDelta = 0
-        CGGetLastMouseDelta(&dx, &dy)
+        let delta = CGGetLastMouseDelta()
+        let dx = delta.x
+        let dy = delta.y
 
         if dx != 0 || dy != 0 {
             let xScale = max(movementScale.x, 1)
