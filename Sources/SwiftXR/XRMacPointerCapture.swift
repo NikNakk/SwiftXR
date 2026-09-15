@@ -250,10 +250,15 @@ public final class XRMacPointerCapture: NSObject {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let xScale = max(movementScale.x, 1)
             let yScale = max(movementScale.y, 1)
+
+            // With the pointer detached from the system cursor, AppKit reports
+            // deltas in the opposite sense to the top-left panel coordinates we
+            // expose publicly. Normalize them here so physical mouse/trackpad
+            // movement and the virtual XR cursor move in the same direction.
             interaction.movePointer(
                 by: SIMD2(
-                    Float(event.deltaX) / xScale,
-                    -Float(event.deltaY) / yScale
+                    -Float(event.deltaX) / xScale,
+                    Float(event.deltaY) / yScale
                 )
             )
             return true
