@@ -100,7 +100,7 @@ final class XRSwiftUIHost<Content: View> {
             sendKey(keyCode: 48, characters: "\t", modifiers: [.shift])
 
         case .select:
-            sendKey(keyCode: 36, characters: "\r")
+            sendKey(keyCode: 49, characters: " ")
 
         case .back:
             sendKey(keyCode: 53, characters: "\u{1b}")
