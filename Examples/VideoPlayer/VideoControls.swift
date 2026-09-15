@@ -20,6 +20,7 @@ final class VideoControlsModel: ObservableObject {
     @Published var volume: Double = 1
     @Published var projectionMode: VideoProjectionMode
     @Published var spatialAudioEnabled = false
+    @Published var isScrubbing = false
 
     var commandHandler: ((VideoControlCommand) -> Void)?
 
@@ -42,7 +43,7 @@ final class VideoControlsModel: ObservableObject {
             self.isPlaying = isPlaying
             changed = true
         }
-        if abs(self.currentTime - currentTime) >= 0.20 {
+        if !isScrubbing, abs(self.currentTime - currentTime) >= 0.20 {
             self.currentTime = currentTime
             changed = true
         }
@@ -74,7 +75,6 @@ final class VideoControlsModel: ObservableObject {
 @MainActor
 struct VideoControlsView: View {
     @ObservedObject var model: VideoControlsModel
-    @State private var scrubbing = false
 
     private var progressBinding: Binding<Double> {
         Binding(
@@ -132,7 +132,7 @@ struct VideoControlsView: View {
                         value: progressBinding,
                         in: 0...max(model.duration, 0.001),
                         onEditingChanged: { editing in
-                            scrubbing = editing
+                            model.isScrubbing = editing
                             if !editing {
                                 model.send(.seekTo(model.currentTime))
                             }
@@ -190,15 +190,23 @@ struct VideoControlsView: View {
         .padding(6)
     }
 
+    @ViewBuilder
     private func projectionButton(
         _ title: String,
         _ mode: VideoProjectionMode
     ) -> some View {
-        Button(title) {
-            model.projectionMode = mode
-            model.send(.setProjection(mode))
+        if model.projectionMode == mode {
+            Button(title) {
+                model.send(.setProjection(mode))
+            }
+            .buttonStyle(.borderedProminent)
+        } else {
+            Button(title) {
+                model.projectionMode = mode
+                model.send(.setProjection(mode))
+            }
+            .buttonStyle(.bordered)
         }
-        .buttonStyle(model.projectionMode == mode ? .borderedProminent : .bordered)
     }
 
     private static func timeString(_ seconds: Double) -> String {
