@@ -73,7 +73,11 @@ let package = Package(
             exclude: ["README.md"],
             linkerSettings: openXRExecutableLinkerSettings + [
                 .linkedFramework("AVFoundation"),
+                .linkedFramework("AVFAudio"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
                 .linkedFramework("CoreVideo"),
+                .linkedFramework("GameController"),
                 .linkedFramework("QuartzCore"),
             ]
         ),
