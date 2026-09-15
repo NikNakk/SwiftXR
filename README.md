@@ -9,6 +9,7 @@
 - Hide C structure initialization, fixed-size arrays, `next` chains, handle lifetime and frame-loop plumbing where doing so does not obscure OpenXR semantics.
 - Expose Metal objects as normal Swift/Metal objects at the public API boundary.
 - Keep the framework below the level of a scene engine. SwiftXR should be closer to MetalKit than to Unity, Godot or RealityKit.
+- Do not wrap mature host input APIs unnecessarily. Games should continue to use Apple's `GameController`, AppKit, or their engine's input system directly.
 
 ## Current milestone: world-locked stereo Metal rendering
 
@@ -29,12 +30,78 @@ SwiftXR can now:
 13. Convert OpenXR poses and asymmetric FOVs into Metal-compatible view/projection matrices.
 14. Render a true world-locked 3D scene independently for each eye.
 15. Rasterize display-only SwiftUI views into reusable Metal textures with `XRSwiftUIPanel`.
+16. Expose device-neutral panel interaction events without wrapping host game-controller or mouse APIs.
 
 The rendered-frame API hands application code an `XRFrame`, the acquired two-layer `MTLTexture`, and an `MTLCommandBuffer`. SwiftXR keeps the OpenXR swapchain/frame state machine out of the application and waits for the final Metal command buffer before destroying the swapchain.
 
 `XRView` exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`. The projection helper converts OpenXR's right-handed, -Z-forward asymmetric FOV into Metal's 0...1 normalized depth convention.
 
 `XRSwiftUIPanel` uses SwiftUI `ImageRenderer` to rasterize a view into an sRGB Metal texture. The texture is reused across XR frames and is only regenerated when `refresh()` is called, so mostly-static UI does not need to be rasterized at headset refresh rate.
+
+## Host input and XR panels
+
+SwiftXR deliberately does **not** provide a replacement for Apple's `GameController` framework or AppKit mouse handling. A game should use its normal input architecture directly.
+
+SwiftXR instead provides a semantic interaction endpoint on each panel:
+
+```swift
+panel.interaction.navigate(.down)
+panel.interaction.select()
+panel.interaction.back()
+panel.interaction.movePointer(to: SIMD2(0.4, 0.7))
+panel.interaction.movePointer(by: SIMD2(0.01, -0.02))
+panel.interaction.scroll(SIMD2(0, -1))
+panel.interaction.pointerDown()
+panel.interaction.pointerUp()
+```
+
+This gives applications one stable way to control an XR UI surface regardless of where the input came from.
+
+For a standard game controller, use `GameController` directly and forward only panel-related intents:
+
+```swift
+let pad = controller.extendedGamepad!
+
+pad.dpad.down.pressedChangedHandler = { _, _, pressed in
+    if pressed { panel.interaction.navigate(.down) }
+}
+
+pad.buttonA.pressedChangedHandler = { _, _, pressed in
+    if pressed { panel.interaction.select() }
+}
+
+pad.buttonB.pressedChangedHandler = { _, _, pressed in
+    if pressed { panel.interaction.back() }
+}
+```
+
+Likewise, an AppKit mouse view can forward relative motion, clicks, and scrolling without SwiftXR duplicating `NSEvent`:
+
+```swift
+override func mouseMoved(with event: NSEvent) {
+    panel.interaction.movePointer(
+        by: SIMD2(Float(event.deltaX), Float(event.deltaY)) * sensitivity
+    )
+}
+
+override func mouseDown(with event: NSEvent) {
+    panel.interaction.pointerDown()
+}
+
+override func mouseUp(with event: NSEvent) {
+    panel.interaction.pointerUp()
+}
+
+override func scrollWheel(with event: NSEvent) {
+    panel.interaction.scroll(
+        SIMD2(Float(event.scrollingDeltaX), Float(event.scrollingDeltaY))
+    )
+}
+```
+
+A future Sense-controller path can hit-test a 6DoF controller ray against the same panel and send the resulting normalized panel coordinate through `movePointer(to:)`, with trigger press/release mapped to `pointerDown()`/`pointerUp()`. The panel interaction API therefore does not need to change when Sense 6DoF support arrives.
+
+The current `ImageRenderer` SwiftUI bridge remains display-only: `XRPanelInteraction` provides the stable semantic boundary and pointer bookkeeping now, while fully dispatching these events into standard hosted SwiftUI controls is the next interaction-layer step.
 
 The OpenXR development headers and loader library (`libopenxr_loader`) must be available to the compiler/linker when building and running SwiftXR.
 
@@ -113,8 +180,6 @@ Run it with:
 swift run swiftui-panel
 ```
 
-This first bridge is display-only. A future interaction layer can map controller-ray hits into panel-local coordinates and feed them back into hosted SwiftUI controls.
-
 There is also a smaller loader/runtime diagnostic executable:
 
 ```sh
@@ -153,9 +218,8 @@ Application code receives predicted frame timing, located views, Metal render ta
 6. ✅ Submit a real stereo projection layer from Swift/Metal through OpenXR.
 7. ✅ Add Metal view/projection matrix helpers and a world-locked 6DoF sample scene.
 8. ✅ Add display-only SwiftUI panel rasterization and a world-space SwiftUI example.
-9. Next: refine the application-facing frame/render API, then add actions/controllers and haptics.
-
-Input/actions, controllers, haptics, hand tracking and higher-level scene helpers are deliberately post-v0.1. They should be layered on after the rendering/session API has settled.
+9. ✅ Add a device-neutral panel interaction boundary without wrapping host input APIs.
+10. Next: dispatch panel interaction events into standard hosted SwiftUI controls, then add OpenXR actions/controllers and haptics.
 
 ## Non-goals
 
