@@ -80,9 +80,6 @@ public final class XRSwiftUIPanel<Content: View> {
                 pointerPosition: interaction.pointerPosition
             )
 
-            // Refresh after interaction so standard SwiftUI state changes become
-            // visible in XR. MetalKit handles the image-origin conversion; the
-            // resulting texture is simply swapped in on the next XR frame.
             try? self.refresh()
 
             DispatchQueue.main.async { [weak self] in
@@ -96,14 +93,57 @@ public final class XRSwiftUIPanel<Content: View> {
         interaction.send(event)
     }
 
-    /// Rasterize the hosted SwiftUI hierarchy again and replace its Metal
-    /// texture. The renderer should read `texture` again before drawing.
+    /// Rasterize the hosted SwiftUI hierarchy again and update the existing
+    /// Metal texture. Keeping the texture identity stable means renderers can
+    /// retain it while SwiftUI state changes underneath.
     public func refresh() throws {
         let image = try host.renderImage()
-        texture = try Self.makeTexture(
+        let refreshed = try Self.makeTexture(
             loader: textureLoader,
             image: image
         )
+
+        guard
+            refreshed.width == texture.width,
+            refreshed.height == texture.height,
+            refreshed.pixelFormat == texture.pixelFormat
+        else {
+            texture = refreshed
+            return
+        }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = refreshed.width * bytesPerPixel
+        var pixels = [UInt8](
+            repeating: 0,
+            count: bytesPerRow * refreshed.height
+        )
+        let region = MTLRegionMake2D(
+            0,
+            0,
+            refreshed.width,
+            refreshed.height
+        )
+
+        pixels.withUnsafeMutableBytes { storage in
+            guard let baseAddress = storage.baseAddress else { return }
+            refreshed.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: region,
+                mipmapLevel: 0
+            )
+        }
+
+        pixels.withUnsafeBytes { storage in
+            guard let baseAddress = storage.baseAddress else { return }
+            texture.replace(
+                region: region,
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
+        }
     }
 
     private static func makeTexture(
