@@ -104,8 +104,18 @@ public final class XRSwiftUIPanel<Content: View> {
         interaction.send(event)
     }
 
-    /// Refresh after AppKit input may have changed the hosted SwiftUI hierarchy.
-    /// Applications should call this once per XR frame before drawing the panel.
+    /// Mark the panel dirty because application state changed independently of
+    /// panel input. This is useful for clocks, progress indicators and other
+    /// model-driven SwiftUI content. The next `refreshIfNeeded()` call performs
+    /// one rasterization; input events still request their short multi-frame
+    /// refresh window for queued AppKit delivery.
+    public func invalidate() {
+        inputRefreshFramesRemaining = max(inputRefreshFramesRemaining, 1)
+    }
+
+    /// Refresh after AppKit input or app-driven invalidation may have changed the
+    /// hosted SwiftUI hierarchy. Applications should call this once per XR frame
+    /// before drawing the panel.
     public func refreshIfNeeded() throws {
         guard inputRefreshFramesRemaining > 0 else { return }
         inputRefreshFramesRemaining -= 1
