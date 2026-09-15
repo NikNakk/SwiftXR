@@ -9,6 +9,8 @@ enum VideoControlCommand {
     case setVolume(Float)
     case recenter
     case setProjection(VideoProjectionMode)
+    case showFiles
+    case showYouTube
 }
 
 @MainActor
@@ -101,7 +103,7 @@ struct VideoControlsView: View {
                 .stroke(.white.opacity(0.20), lineWidth: 1.5)
 
             VStack(spacing: 13) {
-                HStack {
+                HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(model.title)
                             .font(.system(size: 18, weight: .semibold))
@@ -116,6 +118,17 @@ struct VideoControlsView: View {
                         .foregroundStyle(.white.opacity(0.65))
                     }
                     Spacer()
+                    Button {
+                        model.send(.showFiles)
+                    } label: {
+                        Label("Files", systemImage: "folder.fill")
+                    }
+                    Button {
+                        model.send(.showYouTube)
+                    } label: {
+                        Label("YouTube", systemImage: "play.rectangle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
                     Button {
                         model.send(.recenter)
                     } label: {
@@ -186,7 +199,7 @@ struct VideoControlsView: View {
             .controlSize(.regular)
             .padding(22)
         }
-        .frame(width: 650, height: 245)
+        .frame(width: 760, height: 270)
         .padding(6)
     }
 
