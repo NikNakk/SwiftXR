@@ -20,6 +20,13 @@ final class XRSwiftUIHost<Content: View> {
     private var pressedButtons: Set<XRPanelPointerButton> = []
     private var pendingAccessibilityButton = false
 
+    // Non-zero only while a native mouseDown is being dispatched directly to
+    // the hosted SwiftUI window. AppKit controls may synchronously enter a
+    // nested tracking loop from mouseDown. Re-entrant nextEvent(...) calls from
+    // that loop must receive the transformed drag/up event rather than having it
+    // dispatched a second time here.
+    private var nativeTrackingDispatchDepth = 0
+
     init(
         pointSize: CGSize,
         scale: CGFloat,
@@ -51,9 +58,10 @@ final class XRSwiftUIHost<Content: View> {
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.makeFirstResponder(hostingView)
 
-        // Keep the surface backed by a real NSWindow/responder chain without
-        // placing anything visible on the user's desktop.
-        window.orderBack(nil)
+        // Keep a real, ordered AppKit window/responder chain. The window is far
+        // off screen, so ordering it normally does not expose the rendered panel
+        // on the desktop, but it does keep AppKit's interaction machinery alive.
+        window.orderFront(nil)
 
         self.window = window
         self.hostingView = hostingView
@@ -80,20 +88,20 @@ final class XRSwiftUIHost<Content: View> {
 
     // MARK: - Native macOS mouse path
 
-    /// Make the hidden SwiftUI host the real key/responder target before the
-    /// transparent capture windows are installed. The capture windows are
-    /// deliberately non-key so AppKit tracking remains associated with this
-    /// window throughout a native control interaction.
     func prepareForNativeMouseCapture() {
         prepareForInteraction()
     }
 
-    /// Convert a physical mouse/trackpad NSEvent into the equivalent event for
-    /// the off-screen SwiftUI window at the current virtual panel position.
+    /// Convert a physical mouse/trackpad event into interaction with the
+    /// off-screen SwiftUI window.
     ///
-    /// `XRMacApplication.nextEvent(...)` returns this event directly to AppKit.
-    /// That is important: controls such as Slider consume drag/up events inside
-    /// nested tracking loops, which bypass NSEvent local monitors.
+    /// Top-level events are dispatched directly to the known host window. This
+    /// is the path already proven to work for normal SwiftUI hit testing. If a
+    /// control synchronously enters an AppKit tracking loop from mouseDown,
+    /// `nativeTrackingDispatchDepth` is non-zero; drag/up events obtained by the
+    /// tracking loop's re-entrant nextEvent(...) call are then returned to that
+    /// loop instead of being dispatched here. This preserves genuine native
+    /// Slider/Button tracking without relying on NSEvent local monitors.
     func transformNativeMouseEvent(
         _ source: NSEvent,
         pointerPosition: SIMD2<Float>
@@ -106,31 +114,61 @@ final class XRSwiftUIHost<Content: View> {
              .leftMouseDown, .leftMouseUp,
              .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
-            let point = windowPoint(for: pointerPosition)
+            guard let event = retargetedMouseEvent(
+                source,
+                pointerPosition: pointerPosition
+            ) else {
+                return nil
+            }
 
-            return NSEvent.mouseEvent(
-                with: source.type,
-                location: point,
-                modifierFlags: source.modifierFlags,
-                timestamp: source.timestamp,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: source.eventNumber,
-                clickCount: source.clickCount,
-                pressure: source.pressure
-            )
+            // A control is currently asking NSApplication.nextEvent(...) for its
+            // next tracking event. Return the transformed event directly to that
+            // nested loop so Slider/drag tracking sees the complete sequence.
+            if nativeTrackingDispatchDepth > 0 {
+                return event
+            }
+
+            switch source.type {
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                nativeTrackingDispatchDepth += 1
+                defer { nativeTrackingDispatchDepth -= 1 }
+                window.sendEvent(event)
+                return nil
+
+            default:
+                // Mouse move/up outside a nested tracking loop is delivered
+                // directly to the known SwiftUI host. This also avoids relying on
+                // NSApplication to rediscover an off-screen target window.
+                window.sendEvent(event)
+                return nil
+            }
 
         case .scrollWheel:
-            // Scroll events do not have a modern public NSEvent constructor that
-            // lets us retarget windowNumber while preserving precise scrolling
-            // metadata. Dispatch the original deltas directly to the known host
-            // window instead; scroll does not participate in mouse tracking.
             sendNativeScroll(source, pointerPosition: pointerPosition)
             return nil
 
         default:
             return source
         }
+    }
+
+    private func retargetedMouseEvent(
+        _ source: NSEvent,
+        pointerPosition: SIMD2<Float>
+    ) -> NSEvent? {
+        let point = windowPoint(for: pointerPosition)
+
+        return NSEvent.mouseEvent(
+            with: source.type,
+            location: point,
+            modifierFlags: source.modifierFlags,
+            timestamp: source.timestamp,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: source.eventNumber,
+            clickCount: source.clickCount,
+            pressure: source.pressure
+        )
     }
 
     private func sendNativeScroll(
