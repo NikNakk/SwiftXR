@@ -1,3 +1,4 @@
+import CoreMedia
 import Darwin
 import Foundation
 import SwiftXR
