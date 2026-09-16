@@ -50,13 +50,14 @@ public final class XRSession {
     public let device: any MTLDevice
     public let commandQueue: any MTLCommandQueue
     public let localSpace: XRReferenceSpace
+    public let kind: XRSessionKind
 
     public private(set) var state: XRSessionState = .idle
     public private(set) var isRunning = false
     public private(set) var shouldExit = false
     public private(set) var instanceLossPending = false
 
-    init(system: XRSystem) throws {
+    init(system: XRSystem, kind: XRSessionKind = .primary) throws {
         let device = try system.metalDevice()
         guard let commandQueue = device.makeCommandQueue() else {
             throw XRError.metalCommandQueueCreationFailed
@@ -67,15 +68,25 @@ public final class XRSession {
             .toOpaque()
 
         var rawSession: UnsafeMutableRawPointer?
-        try xrCheck(
-            swiftxr_create_metal_session(
+        let createResult: XrResult
+        switch kind {
+        case .primary:
+            createResult = swiftxr_create_metal_session(
                 system.instance.handle,
                 system.systemID,
                 rawCommandQueue,
                 &rawSession
-            ),
-            "xrCreateSession(Metal)"
-        )
+            )
+        case let .overlay(layerPlacement):
+            createResult = swiftxr_create_metal_overlay_session(
+                system.instance.handle,
+                system.systemID,
+                rawCommandQueue,
+                layerPlacement,
+                &rawSession
+            )
+        }
+        try xrCheck(createResult, "xrCreateSession(Metal)")
 
         guard let sessionHandle = rawSession else {
             throw XRError.unexpectedNull("XrSession")
@@ -118,6 +129,7 @@ public final class XRSession {
         self.commandQueue = commandQueue
         self.handle = sessionHandle
         self.environmentBlendMode = blendMode
+        self.kind = kind
         self.localSpace = XRReferenceSpace(
             handle: localSpaceHandle,
             type: .local
