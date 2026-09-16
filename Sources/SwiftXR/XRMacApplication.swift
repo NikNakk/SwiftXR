@@ -17,9 +17,15 @@ import AppKit
 @MainActor
 @objc(XRMacApplication)
 open class XRMacApplication: NSApplication {
-    typealias EventTransformer = (NSEvent) -> NSEvent?
+    public typealias EventTransformer = (NSEvent) -> NSEvent?
 
-    var swiftXREventTransformer: EventTransformer?
+    /// Optional application-level event transformer invoked from `nextEvent`.
+    ///
+    /// SwiftXR pointer capture chains any transformer already installed here,
+    /// which lets host applications inspect or consume high-fidelity AppKit
+    /// events (for example precise trackpad scroll events) before they are
+    /// reduced to semantic panel input.
+    public var swiftXREventTransformer: EventTransformer?
 
     open override func nextEvent(
         matching mask: NSEvent.EventTypeMask,
