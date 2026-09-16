@@ -60,8 +60,9 @@ public enum XRMonadoRuntimeControlError: Error, LocalizedError, Sendable {
 ///
 /// SwiftXR loads libmonado dynamically so applications using SwiftXR remain
 /// buildable and usable with non-Monado OpenXR runtimes. The default loader
-/// searches the normal dynamic-loader path plus common Homebrew/local install
-/// locations. Set `SWIFTXR_LIBMONADO_PATH` to override the library location.
+/// searches the development runtime build tree, normal dynamic-loader path and
+/// common Homebrew/local install locations. Set `SWIFTXR_LIBMONADO_PATH` to
+/// override the library location.
 ///
 /// The underlying libmonado connection is not intended for concurrent access;
 /// callers should serialize calls to an instance of this class.
@@ -99,7 +100,7 @@ public final class XRMonadoRuntimeControl {
     }
 
     deinit {
-        var root: OpaquePointer? = root
+        var root: OpaquePointer? = self.root
         api.rootDestroy(&root)
     }
 
@@ -296,16 +297,35 @@ private final class MonadoAPI {
             return [explicitPath]
         }
 
-        if let environmentPath = ProcessInfo.processInfo.environment["SWIFTXR_LIBMONADO_PATH"],
+        let environment = ProcessInfo.processInfo.environment
+        if let environmentPath = environment["SWIFTXR_LIBMONADO_PATH"],
            !environmentPath.isEmpty {
             return [environmentPath]
         }
 
-        return [
+        var candidates: [String] = []
+
+        if let runtimeManifest = environment["XR_RUNTIME_JSON"], !runtimeManifest.isEmpty {
+            let buildRoot = URL(
+                fileURLWithPath: (runtimeManifest as NSString).expandingTildeInPath
+            ).deletingLastPathComponent()
+
+            candidates.append(
+                buildRoot
+                    .appendingPathComponent("src/xrt/targets/libmonado/libmonado.dylib")
+                    .path
+            )
+            candidates.append(
+                buildRoot.appendingPathComponent("lib/libmonado.dylib").path
+            )
+        }
+
+        candidates.append(contentsOf: [
             "libmonado.dylib",
             "/usr/local/lib/libmonado.dylib",
             "/opt/homebrew/lib/libmonado.dylib",
-        ]
+        ])
+        return candidates
     }
 
     private static func loadSymbol<T>(
