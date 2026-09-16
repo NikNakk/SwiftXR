@@ -29,6 +29,7 @@ SwiftXR can now:
 12. Host normal SwiftUI views off-screen and expose them as reusable Metal textures in XR.
 13. Route device-neutral panel interaction events into a real `NSHostingView` responder chain so standard SwiftUI controls can receive pointer, scroll, navigation, select, and back input.
 14. Capture the ordinary macOS mouse/trackpad exclusively for XR without moving or clicking the desktop cursor.
+15. Optionally enumerate and control Monado service clients through a dynamically loaded `libmonado`, without making Monado a build-time dependency of SwiftXR.
 
 `XRView` exposes `viewMatrix`, `projectionMatrix(nearZ:farZ:)`, and `viewProjectionMatrix(nearZ:farZ:)`.
 
@@ -94,6 +95,30 @@ If SwiftXR loses foreground focus (for example via Cmd-Tab), capture is suspende
 This uses AppKit/Core Graphics for pointer ownership; `GCMouse` remains useful when an application specifically wants GameController's representation of a physical mouse, but it does not itself provide exclusive desktop cursor capture.
 
 A future Sense-controller path can hit-test a 6DoF controller ray against the same panel and send a normalized panel coordinate through `movePointer(to:)`, with trigger press/release mapped to `pointerDown()`/`pointerUp()`. The panel API does not need to change when Sense 6DoF arrives.
+
+## Optional Monado runtime control
+
+`XRMonadoRuntimeControl` is a deliberately small runtime-specific control surface for host applications such as launchers. It is separate from the normal OpenXR API and should only be used when an application explicitly wants to manage Monado service clients.
+
+SwiftXR loads `libmonado.dylib` at runtime with `dlopen`, so importing SwiftXR does **not** add a Monado link or header dependency. If `libmonado` is unavailable, normal OpenXR functionality is unaffected and creating `XRMonadoRuntimeControl` simply throws.
+
+```swift
+let monado = try XRMonadoRuntimeControl()
+let clients = try monado.refreshClients()
+
+for client in clients {
+    print(client.id, client.name, client.state)
+}
+
+if let game = clients.first(where: { $0.name == "My Game" }) {
+    try monado.setPrimary(clientID: game.id)
+    try monado.setFocused(clientID: game.id)
+}
+```
+
+The typed client state exposes Monado's primary, active, visible, focused, overlay and IO-block flags.
+
+Library lookup checks `SWIFTXR_LIBMONADO_PATH` first. For development builds it also derives the Monado build directory from `XR_RUNTIME_JSON` and looks for `src/xrt/targets/libmonado/libmonado.dylib`, followed by the normal dynamic-loader path and common `/usr/local/lib` and `/opt/homebrew/lib` locations.
 
 ## Examples
 
@@ -170,4 +195,4 @@ The OpenXR development headers and loader library (`libopenxr_loader`) must be a
 
 ## Non-goals
 
-SwiftXR should not contain headset-specific tracking algorithms, compositor scheduling policy, or runtime-specific device handling. Those remain runtime responsibilities below OpenXR.
+SwiftXR should not contain headset-specific tracking algorithms, compositor scheduling policy, or runtime-specific device handling. Those remain runtime responsibilities below OpenXR. The optional Monado control wrapper is host/runtime orchestration rather than device implementation.
