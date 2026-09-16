@@ -47,9 +47,19 @@ public struct XRRuntimeCapabilities: Sendable {
         extensions.contains { $0.name == "XR_KHR_metal_enable" }
     }
 
+    public var supportsOverlay: Bool {
+        extensions.contains { $0.name == "XR_EXTX_overlay" }
+    }
+
     public func requireMetal() throws {
         guard supportsMetal else {
             throw XRError.requiredExtensionMissing("XR_KHR_metal_enable")
+        }
+    }
+
+    public func requireOverlay() throws {
+        guard supportsOverlay else {
+            throw XRError.requiredExtensionMissing("XR_EXTX_overlay")
         }
     }
 }
@@ -114,14 +124,31 @@ public final class XRInstance {
     let handle: UnsafeMutableRawPointer
 
     public let runtime: XRRuntimeInfo
+    public let overlayEnabled: Bool
 
-    public init(applicationName: String = "SwiftXR") throws {
+    public init(
+        applicationName: String = "SwiftXR",
+        enableOverlay: Bool = false
+    ) throws {
         let capabilities = try XRRuntime.capabilities()
         try capabilities.requireMetal()
+        if enableOverlay {
+            try capabilities.requireOverlay()
+        }
 
         var rawInstance: UnsafeMutableRawPointer?
         let createResult = applicationName.withCString { applicationNamePointer in
-            swiftxr_create_instance(applicationNamePointer, &rawInstance)
+            if enableOverlay {
+                swiftxr_create_instance_with_overlay(
+                    applicationNamePointer,
+                    &rawInstance
+                )
+            } else {
+                swiftxr_create_instance(
+                    applicationNamePointer,
+                    &rawInstance
+                )
+            }
         }
         try xrCheck(createResult, "xrCreateInstance")
 
@@ -145,6 +172,7 @@ public final class XRInstance {
 
         self.handle = handle
         self.runtime = XRRuntimeInfo(name: name, version: version)
+        self.overlayEnabled = enableOverlay
     }
 
     deinit {
@@ -220,7 +248,7 @@ public final class XRSystem {
         return device
     }
 
-    public func makeSession() throws -> XRSession {
-        try XRSession(system: self)
+    public func makeSession(kind: XRSessionKind = .primary) throws -> XRSession {
+        try XRSession(system: self, kind: kind)
     }
 }
