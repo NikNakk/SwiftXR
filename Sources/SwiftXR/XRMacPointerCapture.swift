@@ -201,6 +201,15 @@ public final class XRMacPointerCapture: NSObject {
             throw XRMacPointerCaptureError.applicationNotActive
         }
 
+        // Re-establish the off-screen SwiftUI host as the key window before
+        // installing the deliberately non-key capture overlays. This is
+        // especially important after Cmd-Tab: application reactivation may
+        // otherwise leave the host window without key status until the first
+        // synthetic click, which can disturb the freshly reacquired capture.
+        interaction.movePointer(
+            to: interaction.pointerPosition ?? SIMD2<Float>(0.5, 0.5)
+        )
+
         savedCursorPosition = CGEvent(source: nil)?.location
         previousPressedMouseButtons = NSEvent.pressedMouseButtons
         createCaptureWindows()
