@@ -118,7 +118,7 @@ if let game = clients.first(where: { $0.name == "My Game" }) {
 
 The typed client state exposes Monado's primary, active, visible, focused, overlay and IO-block flags.
 
-Library lookup checks `SWIFTXR_LIBMONADO_PATH` first. For development builds it also derives the Monado build directory from `XR_RUNTIME_JSON` and looks for `src/xrt/targets/libmonado/libmonado.dylib`, followed by the normal dynamic-loader path and common `/usr/local/lib` and `/opt/homebrew/lib` locations.
+Library lookup checks `SWIFTXR_LIBMONADO_PATH` first, then reads the runtime manifest selected by `XR_RUNTIME_JSON`, or the standard `active_runtime.json` locations when unset. Manifest symlinks are resolved before interpreting relative `MND_libmonado_path` and `library_path` values. It also checks development-build paths, the normal dynamic-loader path, and common `/usr/local/lib` and `/opt/homebrew/lib` locations.
 
 ## Examples
 
@@ -196,3 +196,87 @@ The OpenXR development headers and loader library (`libopenxr_loader`) must be a
 ## Non-goals
 
 SwiftXR should not contain headset-specific tracking algorithms, compositor scheduling policy, or runtime-specific device handling. Those remain runtime responsibilities below OpenXR. The optional Monado control wrapper is host/runtime orchestration rather than device implementation.
+
+
+## Tracked panel input (local development)
+
+Create one `XRControllerInput(session:)` before starting a session. It creates
+and attaches its OpenXR action set once; applications that own additional action
+sets must coordinate their attachment rather than attach another set later.
+Call `poll(predictedDisplayTime:)` inside the frame encoding callback, using the
+current `XRFrame.predictedDisplayTime`. Aim poses are located in the session's
+LOCAL reference space, matching the rendered views.
+
+The snapshot exposes left/right aim poses, trigger select, primary face button,
+grip, back, menu, home, recenter and thumbstick states. `isFocused` gates
+interaction; `isActive` identifies an available hand even when its aim pose is
+temporarily invalid. Button values are levels: clients should detect edges and
+suppress held buttons when entering a mode, connecting a controller or regaining
+focus.
+
+`menu` is the application menu button and `home` the system button that shells
+use to return to their home view. `XRInstance` enables `XR_MNDX_psvr2_interaction`
+and `XR_KHR_generic_controller` whenever the runtime offers them
+(`enabledInputExtensions`), and `XRControllerInput` suggests one binding set per
+interaction profile; the runtime picks one per controller, preferring the
+controller's own profile:
+
+| Profile | Primary | Back | Recenter | Menu | Home |
+| --- | --- | --- | --- | --- | --- |
+| PS VR2 Sense (MNDX) | Square / Cross | Circle | Triangle | Create | PS (either hand) |
+| Generic controller (KHR) | primary (both hands) | right secondary | left secondary | — | — |
+| Oculus Touch | X / A | B | Y | left menu | right system |
+| Simple controller | — | — | — | menu | — |
+
+Options on the Sense controllers is left unbound because holding it recentres in
+Monado. The generic profile has no menu or system button by design. Runtimes may
+withhold system buttons from applications. No haptic output is configured.
+
+For panels with separately drawn cursors, set
+`panel.refreshesOnPointerMovement = false` to avoid a complete SwiftUI bitmap and
+texture upload on each hover move. Observe model changes and call `invalidate()`
+for hover-driven content; button, drag, key and scroll events still schedule
+refreshes. `refreshIfNeeded()` returns whether it rasterised the panel, allowing
+callers to measure or regression-test unnecessary redraws. Pointer exit followed
+by pointer-up cancels a drag outside the host instead of clicking its last hit.
+
+
+### Panel uploads and frame-thread ownership
+
+Panel capture and semantic AppKit input remain main-actor operations. Set
+`usesImmutableTextures = true` when a separate XR thread samples the panel;
+after refreshing, publish the new `texture` to that thread and retain the old
+texture until its GPU work is complete. The default keeps texture identity
+stable for existing single-threaded renderers. Uploads use a reusable BGRA CPU
+bitmap with one texture upload, avoiding a temporary Metal texture/readback.
+Native semantic scrolling resolves the hit-tested scroll view (or the panel's
+main vertical scroll view), preserves fractional points and constrains its clip
+bounds; it does not rely on a windowless synthetic wheel event.
+
+A caller may move its OpenXR session/frame loop to a dedicated thread provided
+it serializes **all** operations on that session, stops and joins the worker
+before changing ownership, and never calls AppKit from the worker. Input
+snapshots and immutable textures can cross the boundary; XR frame submission
+must not synchronously wait for UI work.
+
+`XRSession.referenceSpaceChangeGeneration` and `referenceSpaceChangeTime`
+expose runtime LOCAL/STAGE reset events after `pollEvents()`. Reposition UI from
+a located frame at or after the effective time, rather than racing the runtime
+with a duplicate button-hold gesture.
+
+
+Off-screen hosting windows honor the requested `scale`, independent of the
+Mac display's Retina density, and reuse their capture bitmap. `scrollInfo` is
+captured with the texture: its viewport is normalized top-left XYWH and its
+offset is measured in viewport heights. A renderer can retain adjacent immutable
+captures and interpolate their scroll positions without moving headers/footers.
+The client must reset such interpolation on layout/content changes and align the
+visual position to native coordinates before a pointer click.
+
+
+Capture bitmap reuse clears all pixels before `cacheDisplay`, preserving alpha
+across redraws and mode changes. The captured scroll viewport excludes a native
+legacy scrollbar gutter, so clients should interpolate the full reported
+viewport rather than reserve an arbitrary strip for an overlay scroller. Pointer
+hover is delivered without making the off-screen host window key; activation,
+keys, scrolling and dragging establish the responder chain when needed.

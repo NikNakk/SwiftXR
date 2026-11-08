@@ -56,6 +56,10 @@ public final class XRSession {
     public private(set) var isRunning = false
     public private(set) var shouldExit = false
     public private(set) var instanceLossPending = false
+    /// Changes when the runtime resets LOCAL/STAGE (for example a system
+    /// recenter gesture). Use the effective time with the next located frame.
+    public private(set) var referenceSpaceChangeGeneration: UInt64 = 0
+    public private(set) var referenceSpaceChangeTime: Int64 = 0
 
     init(system: XRSystem, kind: XRSessionKind = .primary) throws {
         let device = try system.metalDevice()
@@ -156,6 +160,8 @@ public final class XRSession {
             var hasState: UInt32 = 0
             var rawState: Int32 = 0
             var lostInstance: UInt32 = 0
+            var referenceChange: UInt32 = 0
+            var referenceChangeTime: Int64 = 0
 
             try xrCheck(
                 swiftxr_poll_session_event(
@@ -164,13 +170,20 @@ public final class XRSession {
                     &hadEvent,
                     &hasState,
                     &rawState,
-                    &lostInstance
+                    &lostInstance,
+                    &referenceChange,
+                    &referenceChangeTime
                 ),
                 "xrPollEvent"
             )
 
             guard hadEvent != 0 else {
                 break
+            }
+
+            if referenceChange != 0 {
+                referenceSpaceChangeGeneration &+= 1
+                referenceSpaceChangeTime = referenceChangeTime
             }
 
             if lostInstance != 0 {

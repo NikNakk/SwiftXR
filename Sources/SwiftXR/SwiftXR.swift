@@ -125,6 +125,11 @@ public final class XRInstance {
 
     public let runtime: XRRuntimeInfo
     public let overlayEnabled: Bool
+    /// Optional interaction-profile extensions enabled because the runtime
+    /// offers them (the PS VR2 Sense and generic controller profiles).
+    public let enabledInputExtensions: Set<String>
+
+    static let optionalInputExtensions = ["XR_MNDX_psvr2_interaction", "XR_KHR_generic_controller"]
 
     public init(
         applicationName: String = "SwiftXR",
@@ -136,16 +141,19 @@ public final class XRInstance {
             try capabilities.requireOverlay()
         }
 
+        let available = Set(capabilities.extensions.map(\.name))
+        let inputExtensions = Self.optionalInputExtensions.filter(available.contains)
+
         var rawInstance: UnsafeMutableRawPointer?
+        let extraNames = inputExtensions.map { strdup($0) }
+        defer { extraNames.forEach { free($0) } }
         let createResult = applicationName.withCString { applicationNamePointer in
-            if enableOverlay {
-                swiftxr_create_instance_with_overlay(
+            extraNames.map { UnsafePointer($0) }.withUnsafeBufferPointer { names in
+                swiftxr_create_instance_with_extensions(
                     applicationNamePointer,
-                    &rawInstance
-                )
-            } else {
-                swiftxr_create_instance(
-                    applicationNamePointer,
+                    enableOverlay ? 1 : 0,
+                    names.baseAddress,
+                    UInt32(names.count),
                     &rawInstance
                 )
             }
@@ -173,6 +181,7 @@ public final class XRInstance {
         self.handle = handle
         self.runtime = XRRuntimeInfo(name: name, version: version)
         self.overlayEnabled = enableOverlay
+        self.enabledInputExtensions = Set(inputExtensions)
     }
 
     deinit {

@@ -305,19 +305,38 @@ private final class MonadoAPI {
 
         var candidates: [String] = []
 
-        if let runtimeManifest = environment["XR_RUNTIME_JSON"], !runtimeManifest.isEmpty {
-            let buildRoot = URL(
-                fileURLWithPath: (runtimeManifest as NSString).expandingTildeInPath
-            ).deletingLastPathComponent()
-
-            candidates.append(
-                buildRoot
-                    .appendingPathComponent("src/xrt/targets/libmonado/libmonado.dylib")
-                    .path
-            )
-            candidates.append(
-                buildRoot.appendingPathComponent("lib/libmonado.dylib").path
-            )
+        let manifests: [String]
+        if let configured = environment["XR_RUNTIME_JSON"], !configured.isEmpty {
+            manifests = [configured]
+        } else {
+            manifests = [
+                "/usr/local/share/openxr/1/active_runtime.json",
+                "/opt/homebrew/share/openxr/1/active_runtime.json",
+                "~/.config/openxr/1/active_runtime.json",
+            ]
+        }
+        for manifest in manifests {
+            // Resolve active_runtime.json symlinks before interpreting paths:
+            // installed runtime manifests use paths relative to their real file.
+            let manifestURL = URL(fileURLWithPath: (manifest as NSString).expandingTildeInPath)
+                .resolvingSymlinksInPath()
+            let directory = manifestURL.deletingLastPathComponent()
+            if let data = try? Data(contentsOf: manifestURL),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let runtime = json["runtime"] as? [String: Any] {
+                if let library = runtime["MND_libmonado_path"] as? String {
+                    candidates.append(URL(fileURLWithPath: (library as NSString).expandingTildeInPath,
+                                          relativeTo: directory).standardizedFileURL.path)
+                }
+                if let library = runtime["library_path"] as? String {
+                    let runtimeURL = URL(fileURLWithPath: (library as NSString).expandingTildeInPath,
+                                         relativeTo: directory).standardizedFileURL
+                    candidates.append(runtimeURL.deletingLastPathComponent()
+                        .appendingPathComponent("libmonado.dylib").path)
+                }
+            }
+            candidates.append(directory.appendingPathComponent("src/xrt/targets/libmonado/libmonado.dylib").path)
+            candidates.append(directory.appendingPathComponent("lib/libmonado.dylib").path)
         }
 
         candidates.append(contentsOf: [

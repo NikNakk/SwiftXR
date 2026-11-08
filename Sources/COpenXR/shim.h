@@ -350,7 +350,9 @@ swiftxr_poll_session_event(
     uint32_t *out_had_event,
     uint32_t *out_has_state,
     int32_t *out_state,
-    uint32_t *out_instance_loss_pending)
+    uint32_t *out_instance_loss_pending,
+    uint32_t *out_reference_space_change,
+    int64_t *out_reference_space_change_time)
 {
     if (instance == NULL || session == NULL ||
         out_had_event == NULL || out_has_state == NULL ||
@@ -362,6 +364,8 @@ swiftxr_poll_session_event(
     *out_has_state = 0;
     *out_state = (int32_t)XR_SESSION_STATE_UNKNOWN;
     *out_instance_loss_pending = 0;
+    *out_reference_space_change = 0;
+    *out_reference_space_change_time = 0;
 
     XrEventDataBuffer event = {0};
     event.type = XR_TYPE_EVENT_DATA_BUFFER;
@@ -382,6 +386,15 @@ swiftxr_poll_session_event(
         if (state_event->session == (XrSession)session) {
             *out_has_state = 1;
             *out_state = (int32_t)state_event->state;
+        }
+    } else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+        const XrEventDataReferenceSpaceChangePending *change =
+            (const XrEventDataReferenceSpaceChangePending *)&event;
+        if (change->session == (XrSession)session &&
+            (change->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ||
+             change->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE)) {
+            *out_reference_space_change = 1;
+            *out_reference_space_change_time = change->changeTime;
         }
     } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
         *out_instance_loss_pending = 1;

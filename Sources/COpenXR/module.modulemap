@@ -2,6 +2,7 @@ module COpenXR [system] {
     header "shim.h"
     header "swapchain.h"
     header "overlay.h"
+    header "input.h"
     link "openxr_loader"
     export *
 }

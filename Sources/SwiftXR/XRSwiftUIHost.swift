@@ -3,6 +3,10 @@ import CoreGraphics
 import SwiftUI
 
 private final class XRSwiftUIHostingWindow: NSWindow {
+    // This window is never presented on a desktop display. Its backing density
+    // is the XR panel's requested density, not that of the Mac's Retina screen.
+    var panelBackingScale: CGFloat = 1
+    override var backingScaleFactor: CGFloat { panelBackingScale }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
@@ -16,6 +20,7 @@ final class XRSwiftUIHost<Content: View> {
     private let hostingView: NSHostingView<Content>
     private var pressedButtons: Set<XRPanelPointerButton> = []
     private var nextMouseEventNumber = 1
+    private var captureBitmap: NSBitmapImageRep?
 
     init(
         pointSize: CGSize,
@@ -40,6 +45,7 @@ final class XRSwiftUIHost<Content: View> {
             backing: .buffered,
             defer: false
         )
+        window.panelBackingScale = scale
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -61,18 +67,24 @@ final class XRSwiftUIHost<Content: View> {
 
     func renderImage() throws -> CGImage {
         hostingView.layoutSubtreeIfNeeded()
+        configureScrollGutters(in: hostingView)
+        hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
-        // Let AppKit select the correct backing resolution. Explicitly creating
-        // a pointSize*scale bitmap made cacheDisplay() fill only one quadrant on
-        // Retina displays.
-        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(
-            in: hostingView.bounds
-        ) else {
+        // Use the off-screen window's requested backing scale and retain the
+        // bitmap between updates instead of allocating a full panel each time.
+        if captureBitmap == nil {
+            captureBitmap = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds)
+        }
+        guard let bitmap = captureBitmap else {
             throw XRSwiftUIPanelError.bitmapContextCreationFailed
         }
 
         bitmap.size = pointSize
+        // cacheDisplay composites into the supplied bitmap. Reuse must start
+        // transparent, or semi-opaque panels become opaque over successive
+        // refreshes and pixels from the previous mode survive in empty areas.
+        bitmap.bitmapData?.update(repeating: 0, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
         hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
 
         guard let image = bitmap.cgImage else {
@@ -118,7 +130,9 @@ final class XRSwiftUIHost<Content: View> {
             deliverPointerMove(to: pointerPosition)
 
         case .pointerExited:
-            break
+            // Move outside the host before releasing a lost ray/drag. Releasing
+            // at the previous hit can accidentally activate a button.
+            deliverPointerMove(to: SIMD2<Float>(-1, -1))
 
         case let .pointerDown(button):
             guard let pointerPosition else { return }
@@ -126,8 +140,9 @@ final class XRSwiftUIHost<Content: View> {
             postPointerButton(button, down: true, at: pointerPosition)
 
         case let .pointerUp(button):
-            guard let pointerPosition else { return }
-            postPointerButton(button, down: false, at: pointerPosition)
+            guard pressedButtons.contains(button) else { return }
+            postPointerButton(button, down: false,
+                              at: pointerPosition ?? SIMD2<Float>(-1, -1))
             pressedButtons.remove(button)
 
         case let .scroll(delta):
@@ -150,7 +165,10 @@ final class XRSwiftUIHost<Content: View> {
     }
 
     private func deliverPointerMove(to normalizedPosition: SIMD2<Float>) {
-        prepareForInteraction()
+        // A hovering XR ray must not steal key-window status from the desktop
+        // companion or its menus. Activation/dragging still establishes the
+        // native host's responder chain when it is actually needed.
+        if !pressedButtons.isEmpty { prepareForInteraction() }
 
         let type: NSEvent.EventType
         if pressedButtons.contains(.primary) {
@@ -238,33 +256,60 @@ final class XRSwiftUIHost<Content: View> {
     ) {
         prepareForInteraction()
 
-        let x = Int32((delta.x * 40).rounded())
-        let y = Int32((delta.y * 40).rounded())
-
-        guard let cgEvent = CGEvent(
-            scrollWheelEvent2Source: nil,
-            units: .pixel,
-            wheelCount: 2,
-            wheel1: y,
-            wheel2: x,
-            wheel3: 0
-        ) else {
-            return
+        let windowLocation = windowPoint(for: pointerPosition ?? SIMD2(0.5, 0.5))
+        let local = hostingView.convert(windowLocation, from: nil)
+        let hit = hostingView.hitTest(local)
+        let scrollView = (hit as? NSScrollView) ?? hit?.enclosingScrollView
+            ?? verticalScrollView(in: hostingView)
+        guard let scrollView, let document = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        var bounds = clip.bounds
+        // Preserve fractional points; rounding at XR refresh rate introduces
+        // dead zones and uneven steps. Scroll only when this view can scroll.
+        if document.bounds.height > bounds.height {
+            bounds.origin.y += CGFloat(delta.y * 40) * (document.isFlipped ? -1 : 1)
         }
-
-        if let pointerPosition {
-            let pointInWindow = windowPoint(for: pointerPosition)
-            cgEvent.location = window.convertPoint(toScreen: pointInWindow)
+        if document.bounds.width > bounds.width {
+            bounds.origin.x -= CGFloat(delta.x * 40)
         }
+        clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+        scrollView.reflectScrolledClipView(clip)
+    }
 
-        guard let event = NSEvent(cgEvent: cgEvent) else {
-            return
+    private func configureScrollGutters(in view: NSView) {
+        if let scroll = view as? NSScrollView, scroll.scrollerStyle != .legacy {
+            // Give the scrollbar a real layout gutter. An overlay scroller
+            // shares pixels with content and cannot be held fixed by excluding
+            // an arbitrary strip of the captured image.
+            scroll.scrollerStyle = .legacy
+            scroll.tile()
         }
+        for subview in view.subviews { configureScrollGutters(in: subview) }
+    }
 
-        // NSEvent has no public scroll-event factory that lets us assign a
-        // windowNumber. Deliver scrolling directly to the known host window;
-        // unlike mouse dragging it does not depend on a nested tracking loop.
-        window.sendEvent(event)
+    func scrollInfo() -> XRPanelScrollInfo? {
+        guard let scroll = verticalScrollView(in: hostingView), let document = scroll.documentView else { return nil }
+        let clip = scroll.contentView
+        guard clip.bounds.height > 0 else { return nil }
+        let viewport = clip.convert(clip.bounds, to: hostingView)
+        let width = hostingView.bounds.width
+        let height = hostingView.bounds.height
+        let top = hostingView.isFlipped ? viewport.minY : height - viewport.maxY
+        let offset = document.isFlipped
+            ? clip.bounds.minY - document.bounds.minY
+            : document.bounds.maxY - clip.bounds.maxY
+        return XRPanelScrollInfo(viewport: SIMD4(Float(viewport.minX / width), Float(top / height),
+                                                Float(viewport.width / width), Float(viewport.height / height)),
+                                 offset: Float(offset / clip.bounds.height))
+    }
+
+    private func verticalScrollView(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView, let document = scroll.documentView,
+           document.bounds.height > scroll.contentView.bounds.height { return scroll }
+        for subview in view.subviews where !subview.isHidden {
+            if let found = verticalScrollView(in: subview) { return found }
+        }
+        return nil
     }
 
     private func sendKey(
